@@ -35,3 +35,6 @@ Thumbs.db
 # Wallet artifacts — generated keystores stay local
 keystores/
 *.keystore
+
+# Claude Code local state
+.claude/
