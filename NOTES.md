@@ -1,0 +1,158 @@
+# NOTES.md — running architecture log
+
+Living document for architecture decisions and the reasons behind them. Newest entry at the top. Pair with `RESEARCH_POLYMARKET.md` for source citations.
+
+---
+
+## 2026-05-14 (late) — Phase 1 kickoff: clarifications & contract address table
+
+### Key clarification: operator funding model
+
+**Users bring their own USDC for bets. We do NOT fund user bets.** This is materially different from a "we operate a trading pot" model and should be stated explicitly in the README and bot UX.
+
+- Operator only needs ~**$5 of MATIC on Polygon** for operator admin transactions: builder profile setup, periodic fee withdrawals via `bridge.polymarket.com/withdraw`, and any one-off contract calls. That's the entire operator bankroll requirement on the Polygon side. No bankroll on Arc side (USDC is the gas asset and testnet USDC is faucet-able).
+- Each user supplies their own pUSD (which they get by depositing USDC into Polymarket from any supported chain). The Telegram bot guides them through this with the Circle Embedded Wallet + Polymarket bridge endpoint.
+- Builder fees are denominated as a percentage of the user's *own* trade size, so revenue scales with user volume, not with operator capital. The operator's downside is zero on individual trades — at worst, a user takes a bad recommendation, but the operator's USDC was never at risk.
+- Risk note #1 in the prior entry ("real-money exposure, cap at 50 USDC bankroll, hard size limit per trade") is **no longer applicable** — there is no operator bankroll. **Supersedes that risk note.** The relevant risk is reputational: a user blindly trusts a recommendation and loses their own money. Mitigation: every recommendation surfaces Kelly fraction, Bayesian probability, top-3 risks, and a confirm step before the bet is placed.
+
+### Quick-reference contract addresses (sourced from RESEARCH_POLYMARKET.md)
+
+| Contract | Address | Network |
+|---|---|---|
+| CTF Exchange V2 (standard) | `0xE111180000d2663C0091e4f400237545B87B996B` | Polygon mainnet |
+| CTF Exchange V2 (neg-risk) | `0xe2222d279d744050d28e00520010520000310F59` | Polygon mainnet |
+| Conditional Tokens (CTF) | `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045` | Polygon mainnet |
+| pUSD (proxy) | `0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB` | Polygon mainnet |
+| CollateralOnramp (USDC.e → pUSD) | `0x93070a847efEf7F70739046A929D47a521F5B8ee` | Polygon mainnet |
+| CollateralOfframp (pUSD → USDC.e) | `0x2957922Eb93258b93368531d39fAcCA3B4dC5854` | Polygon mainnet |
+| USDC.e | `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174` | Polygon mainnet |
+| Deposit Wallet Factory | `0x00000000000Fb5C9ADea0298D729A0CB3823Cc07` | Polygon mainnet |
+
+The agent code must always select between the standard and neg-risk exchange addresses based on `market.neg_risk` returned from the CLOB. Hard-coding either one is a latent bug.
+
+### Canonical agent setup (lock this in `apps/bot/src/polymarket/client.ts`)
+
+```ts
+import { ClobClient, SignatureTypeV2, Side, OrderType } from "@polymarket/clob-client-v2";
+
+const client = new ClobClient({
+  host: "https://clob.polymarket.com",
+  chain: 137,                              // Polygon mainnet — no testnet exists
+  signer,                                  // EOA signer (private key)
+  creds: apiCreds,                         // from createOrDeriveApiKey()
+  signatureType: SignatureTypeV2.POLY_1271, // value 3 — deposit wallet
+  funderAddress: depositWalletAddress,     // smart-account, deployed via relayer WALLET-CREATE
+});
+
+// Per-order — read tick size and negRisk fresh every time
+const market = await client.getMarket(conditionId);
+const response = await client.createAndPostOrder(
+  { tokenID, price, size, side: Side.BUY, builderCode: BUILDER_CODE_BYTES32 },
+  { tickSize: String(market.minimum_tick_size), negRisk: market.neg_risk },
+  OrderType.GTC,
+);
+```
+
+### Operator day-2 todos (do not forget)
+
+- [ ] Email `builder@polymarket.com` with the registered API key + use case + expected daily volume to apply for **Verified tier** (10K relayer txns/day, up from 100). Phrase the use case as "open-source agentic facilitator routing user-confirmed trades through Polymarket with builder attribution, settling proceeds via Circle CCTP to Arc."
+- [ ] Verify USYC is deployed on Arc Testnet before wiring the operator-share auto-deposit. If only on mainnet, stub it with a yield-token mock on Arc Testnet (operator share goes to mock vault, dashboard shows "would be USYC" rendered).
+- [ ] Confirm CCTP V2 accepts mainnet-source → testnet-destination (Polygon domain 7 → Arc Testnet domain 26). If not, build the 30-line mirror service (pre-funded testnet USDC EOA that emits matching transfers when it sees receipts on the Polygon mainnet EOA).
+
+### Reaffirmed (no change from prior entry)
+
+- pUSD → native USDC redeem path is `POST https://bridge.polymarket.com/withdraw` with `toChainId: 137` and `toTokenAddress = native USDC`. Instant, free, permissionless.
+- Per-order `builderCode` (bytes32) attached to every `createAndPostOrder` call. No retroactive attribution.
+- L1 vs L2 in the docs = API access tiers, not signature types. Signature types are 0/1/2/3 = EOA/POLY_PROXY/GNOSIS_SAFE/POLY_1271.
+- Stoa contracts (Splitter + TracePin) live on Arc Testnet regardless of how USDC arrives. Same code whether the fee path is CCTP-direct or mirror-service.
+
+---
+
+## 2026-05-14 — Polymarket research pass forces hybrid mainnet/testnet architecture
+
+### What changed
+
+The initial brief assumed a "fees flow Polymarket on Polygon mainnet → CCTP → Stoa on Arc mainnet" loop. Today's doc-learning pass invalidates that, in two directions:
+
+1. **Arc is testnet-only** (already known from yesterday — confirmed in CCTP V2 supported chains: Arc = domain 26, testnet only).
+2. **Polymarket is mainnet-only.** The CLOB, pUSD, builder leaderboard, deposit wallets, and bridge endpoints all run on Polygon mainnet (chain 137) with no Amoy equivalent. Confirmed from `docs.polymarket.com/resources/contracts.md` (*"all Polymarket contracts are deployed on Polygon mainnet"*) and the API introduction page (only mainnet hosts listed).
+
+These two facts together rule out **both** a full-mainnet loop and a full-testnet loop. A hybrid is the only path.
+
+### New architecture (locked in)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  POLYGON MAINNET (real USDC, small bankroll)            │
+│  - Agent has deposit wallet (POLY_1271, signatureType 3)│
+│  - Agent has Unverified-tier builder code (bytes32)     │
+│  - Trades CTF Exchange V2 with builderCode on order     │
+│  - Builder fee lands as pUSD in the builder profile     │
+│    wallet, per-trade (verify atomic vs batched after    │
+│    first live fill)                                     │
+│  - Agent calls POST bridge.polymarket.com/withdraw      │
+│    to convert pUSD → native USDC on Polygon (instant,   │
+│    free, permissionless)                                │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼  (native USDC on Polygon)
+┌─────────────────────────────────────────────────────────┐
+│  CCTP V2 — Polygon (domain 7) → Arc Testnet (domain 26) │
+│  *** OPEN QUESTION: does CCTP V2 allow                  │
+│  mainnet-source → testnet-destination? ***              │
+│  If yes: direct CCTP burn + mint, ~8-20s finality.      │
+│  If no: "mirror service" (~30 lines TS) watches the     │
+│  Polygon USDC receipt and re-emits an equivalent        │
+│  pre-funded testnet USDC transfer on Arc Testnet.       │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼  (USDC on Arc Testnet)
+┌─────────────────────────────────────────────────────────┐
+│  ARC TESTNET (USDC-native gas, all Circle products)     │
+│  - Stoa facilitator (Cloudflare Worker)                 │
+│  - Splitter.sol — 60% operator / 20% user / 15% Polyseer│
+│    / 5% Canteen/Agora                                   │
+│  - TracePin.sol — pins reasoning-trace hashes           │
+│  - Operator's 60% auto-deposits to Circle USYC          │
+│    (verify USYC is on Arc Testnet before locking this)  │
+│  - Circle Embedded Wallets via App Kit (Telegram users) │
+│  - Circle Paymaster (users pay gas in USDC)             │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Why this is still good for judging
+
+- **Traction (30%):** trades are real Polygon mainnet txs with real Polymarket builder fees. Judges can verify on Polygonscan.
+- **Circle (20%):** all five Circle products still in the loop — Arc, USDC, CCTP V2, Embedded Wallets, Paymaster, USYC. Touching every Circle product remains the goal.
+- **Agentic (30%):** the Polymarket-mainnet leg means the agent is committing real capital to its own decisions, which is more agentic than placing fake trades.
+- **Innovation (20%):** the cross-chain split-on-settle pattern (Polymarket mainnet trade → CCTP → atomic Arc settlement that simultaneously distributes to 4 stakeholders and earns USYC yield) is the unique synthesis. The hybrid setup is honest, not a workaround.
+
+### Risks introduced by the change
+
+1. **Real-money exposure.** Bankroll is real. Cap it: agent operates with ≤ 50 USDC on Polygon, hard size limit per trade (e.g., ≤ 5 USDC), refuses to trade if balance < 5 USDC. Encode the cap in code, not config.
+2. **Builder relayer cap is 100 txns/day on Unverified.** Wallet deployment + approvals burn ~3 of those upfront. Withdrawals also count. The actual order placements don't appear to count (CLOB does them off-relayer), but every fee bridge-out does. Plan: batch fee withdrawals — only call `bridge.polymarket.com/withdraw` once per session/day, not after every fill. **File for Verified-tier upgrade on day 2** (email builder@polymarket.com with API key + use case + expected volume).
+3. **CCTP mainnet→testnet routing.** Open question; needs verification before we write the CCTP integration. If unsupported, the mirror service is fine but adds a small attack surface (the mirror's pre-funded testnet wallet is a trust point in the demo). Mitigation: scope the mirror's authority tightly — it can only emit testnet USDC equal to amounts it sees received on its specified Polygon address.
+4. **USYC on Arc Testnet.** Not yet verified — if USYC is mainnet-only, we either drop the auto-deposit step (lose part of the Circle story) or simulate it with a stub yield-token contract on Arc Testnet. Verify before scaffolding the operator-share flow.
+5. **No Polymarket testnet means we can't run integration tests against a real CLOB without spending mainnet USDC.** Mitigation: mock the Polymarket client in unit tests, and treat the first 5-10 mainnet trades as "integration tests" with sub-$1 sizes.
+
+### Decisions locked
+
+- **signatureType: 3 (POLY_1271, deposit wallet) for the agent.** Pairs with relayer for gas-free approvals and CTF ops, and is the recommended path for new API users.
+- **Bridge endpoint, not direct CollateralOfframp call, for fee unwrap.** One call instead of two; Polymarket pays the gas; gets us native USDC directly.
+- **Per-order builderCode field.** Set on every `createAndPostOrder` invocation. No retroactive attribution.
+- **Two exchange-contract code paths.** Always read `market.neg_risk` and pass it through to order options. Don't hard-code `negRisk: false`.
+- **Tick size read from the market object before each order.** Don't hard-code `"0.01"`.
+
+### Open items still to verify (do these inside the next 24h)
+
+- [ ] Does CCTP V2 attestation API accept Polygon-mainnet (7) → Arc-testnet (26)? If no, build the mirror service.
+- [ ] Is USYC deployed on Arc Testnet, and what's the deposit interface?
+- [ ] Confirm builder fee transfer is atomic-on-settlement vs batched (check CTF Exchange V2 source on Polygonscan, or observe our own first live trade).
+- [ ] Read `api-reference/geoblock.md` — make sure our origin and registered country aren't restricted.
+- [ ] Try the Polymarket MCP tool (`SearchPolymarketDocumentation`) next session as a cross-check of today's WebFetch findings — especially on builder fee payout mechanics, since that's the corner of the docs that was thinnest.
+
+### Reaffirmed from initial pass
+
+- 4-way revenue split: 60% operator / 20% user / 15% Polyseer / 5% Canteen-Agora (per project memory).
+- Stack: TS everywhere except Solidity in `/contracts`. Foundry for tests. Cloudflare Workers + Hono for facilitator. Next.js + Tailwind for dashboard. grammY for Telegram bot.
+- Phase 1 next: scaffold the monorepo and write Splitter.sol + TracePin.sol with Foundry tests on Arc Testnet. The architecture above doesn't change that — Splitter/TracePin are the same regardless of whether USDC arrives via CCTP or via the mirror service.
