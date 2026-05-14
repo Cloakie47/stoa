@@ -1,0 +1,37 @@
+# Secrets — never commit these
+.env
+.env.*
+!.env.example
+
+# Node / JS
+node_modules/
+dist/
+build/
+.next/
+out/
+coverage/
+*.log
+.pnpm-store/
+.turbo/
+
+# Foundry
+cache/
+broadcast/
+lib/forge-std/
+lib/openzeppelin-contracts/
+# Belt-and-braces for any other vendored dep Foundry installs into lib/
+contracts/lib/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Wallet artifacts — generated keystores stay local
+keystores/
+*.keystore
