@@ -15,7 +15,7 @@ export type { FacilitatorConfig, EvmConfig, SvmConfig } from "./types.js";
 /**
  * Package version, injected at build time.
  */
-const PACKAGE_VERSION = "1.0.0";
+const PACKAGE_VERSION = "0.0.1";
 
 /**
  * Creates a mountable Hono sub-app implementing the x402 facilitator protocol.
@@ -48,28 +48,34 @@ const PACKAGE_VERSION = "1.0.0";
  * @returns A Hono sub-app with `/supported`, `/verify`, and `/settle` routes.
  */
 export async function x402Facilitator(config: FacilitatorConfig): Promise<Hono> {
-  if (!config.evm && !config.svm) {
-    throw new Error("At least one of `evm` or `svm` must be configured.");
+  if (!config.evm && !config.svm && !config.stoaSplit) {
+    throw new Error("At least one of `evm`, `svm`, or `stoaSplit` must be configured.");
   }
 
-  const facilitator = await buildFacilitator(config);
+  const bundle = await buildFacilitator(config);
   const nonceStore = config.nonceStore ?? memoryNonceStore();
 
   const app = new Hono();
 
   app.get("/", (c) => {
-    const supported = facilitator.getSupported();
+    const upstream = bundle.facilitator.getSupported();
+    const stoaKinds = Array.from(bundle.stoaSplitHandlers.keys()).map((network) => ({
+      x402Version: 2,
+      scheme: "stoa-split-evm",
+      network,
+    }));
     return c.json({
-      name: "@oviato/x402-facilitator-hono",
+      name: "@stoa/facilitator",
       version: PACKAGE_VERSION,
-      supported: supported.kinds,
-      docs: "https://github.com/OviatoHQ/x402-facilitator-hono",
+      supported: [...upstream.kinds, ...stoaKinds],
+      docs: "https://github.com/Cloakie47/stoa",
+      fork_of: "@oviato/x402-facilitator-hono",
     });
   });
 
-  app.get("/supported", handleSupported(facilitator));
-  app.post("/verify", handleVerify(facilitator, nonceStore));
-  app.post("/settle", handleSettle(facilitator, nonceStore));
+  app.get("/supported", handleSupported(bundle));
+  app.post("/verify", handleVerify(bundle, nonceStore));
+  app.post("/settle", handleSettle(bundle, nonceStore));
 
   return app;
 }

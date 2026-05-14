@@ -1,21 +1,22 @@
 import type { Context } from "hono";
-import type { x402Facilitator } from "@x402/core/facilitator";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
 import type { NonceStore } from "../nonce/types.js";
 import { extractNonce } from "../nonce/extract.js";
+import { STOA_SPLIT_SCHEME, verifyStoaSplit } from "../schemes/evm/stoa-split.js";
+import type { StoaSplitPayload, StoaSplitRequirements } from "../schemes/evm/stoa-split-types.js";
+import type { FacilitatorBundle } from "../schemes/registry.js";
 
 /**
  * Handles `POST /verify`.
  *
- * Accepts the standard x402 verify request body and delegates to the
- * appropriate scheme handler based on the network field.
+ * Dispatches based on `paymentRequirements.scheme`:
+ *  - `stoa-split-evm` → runs Stoa's structural verifier (no on-chain call).
+ *  - anything else → delegates to upstream `facilitator.verify`.
  *
- * Checks the `NonceStore` for replay protection before verifying.
+ * Checks the `NonceStore` for replay protection before verifying in both paths.
  */
-export function handleVerify(
-  facilitator: InstanceType<typeof x402Facilitator>,
-  nonceStore: NonceStore,
-) {
+export function handleVerify(bundle: FacilitatorBundle, nonceStore: NonceStore) {
+  const { facilitator, stoaSplitHandlers } = bundle;
   return async (c: Context) => {
     try {
       const body = (await c.req.json()) as {
@@ -27,16 +28,28 @@ export function handleVerify(
         return c.json({ error: "Missing paymentPayload or paymentRequirements" }, 400);
       }
 
-      // Check nonce replay protection
       const nonce = extractNonce(body.paymentPayload);
       if (nonce) {
         const seen = await nonceStore.has(nonce);
         if (seen) {
+          return c.json({ isValid: false, invalidReason: "nonce_already_used" });
+        }
+      }
+
+      if (body.paymentRequirements.scheme === STOA_SPLIT_SCHEME) {
+        const handler = stoaSplitHandlers.get(body.paymentRequirements.network);
+        if (!handler) {
           return c.json({
             isValid: false,
-            invalidReason: "nonce_already_used",
+            invalidReason: `stoa_split_unsupported_network:${body.paymentRequirements.network}`,
           });
         }
+        const result = verifyStoaSplit(
+          handler,
+          body.paymentPayload.payload as unknown as StoaSplitPayload,
+          body.paymentRequirements as unknown as StoaSplitRequirements,
+        );
+        return c.json(result);
       }
 
       const response = await facilitator.verify(body.paymentPayload, body.paymentRequirements);

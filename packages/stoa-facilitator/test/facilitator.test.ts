@@ -73,10 +73,11 @@ describe("x402Facilitator Hono sub-app", () => {
       const res = await app.request("/facilitator");
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.name).toBe("@oviato/x402-facilitator-hono");
-      expect(body.version).toBe("1.0.0");
+      expect(body.name).toBe("@stoa/facilitator");
+      expect(body.version).toBe("0.0.1");
       expect(body.supported).toBeInstanceOf(Array);
-      expect(body.docs).toBe("https://github.com/OviatoHQ/x402-facilitator-hono");
+      expect(body.docs).toBe("https://github.com/Cloakie47/stoa");
+      expect(body.fork_of).toBe("@oviato/x402-facilitator-hono");
     });
   });
 
@@ -314,7 +315,7 @@ describe("x402Facilitator config validation", () => {
   it("throws when neither evm nor svm is configured", async () => {
     const { x402Facilitator: factory } = await import("../src/index.js");
     await expect(factory({})).rejects.toThrow(
-      "At least one of `evm` or `svm` must be configured.",
+      "At least one of `evm`, `svm`, or `stoaSplit` must be configured.",
     );
   });
 });

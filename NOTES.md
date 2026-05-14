@@ -4,6 +4,62 @@ Living document for architecture decisions and the reasons behind them. Newest e
 
 ---
 
+## 2026-05-14 (later) — CCTP mainnet→testnet route resolved: NOT supported, mirror service plan locked
+
+### Finding
+
+CCTP V2 attestation services are environment-isolated. Two pieces of evidence:
+
+1. **Separate IRIS hosts.** Mainnet: `https://iris-api.circle.com`. Testnet/sandbox: `https://iris-api-sandbox.circle.com`. The two services run independent attester sets and signing keys (per Circle's docs).
+2. **Disjoint domain ID spaces.** Arc Testnet is domain `26` in the *testnet* CCTP V2 registry. Polygon mainnet is domain `7` in the *mainnet* CCTP V2 registry. A mainnet `TokenMessengerV2.depositForBurn(amount, destinationDomain=26, ...)` either reverts because mainnet does not recognize `26` as a registered destination, or burns successfully but no attestation is ever produced because mainnet IRIS does not sign for testnet destinations.
+
+The docs do not explicitly say "no cross-environment routes are supported" in those words, but the architecture and tooling all point in that direction. There is no plausible interpretation under which a mainnet Polygon burn can be minted on Arc Testnet via CCTP. **Treat as unsupported.**
+
+### Consequence: mirror service required
+
+To complete the demo loop (Polymarket builder fees on Polygon mainnet → Stoa Splitter on Arc Testnet), we need a small off-chain mirror that watches one wallet on each side and re-emits matching transfers across environments. Roughly:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Polygon mainnet                                              │
+│  - "operator-bridge" EOA receives native USDC from            │
+│     bridge.polymarket.com/withdraw                            │
+│  - Mirror watcher reads Transfer events to this address       │
+└──────────────────────────────────────────────────────────────┘
+                          │ (off-chain notification)
+                          ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Mirror service (Cloudflare Worker cron, ~30 lines)           │
+│  - For each detected Polygon receipt of N USDC                │
+│  - Sends N testnet-USDC on Arc Testnet from "mirror" EOA      │
+│    to the configured destination (Splitter / StoaSettler)     │
+│  - Records the cross-env mapping (polygon tx hash ↔ arc tx)   │
+│    for audit                                                  │
+└──────────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+                  Arc Testnet, StoaSettler / Splitter
+```
+
+**Trust model.** The mirror's authority is centralized (operator-controlled key). The dashboard surfaces every mirror tx with its corresponding Polygon source tx so the operation is fully auditable. For the hackathon demo this is acceptable; production would replace this with either (a) a real mainnet→mainnet CCTP route once Arc launches mainnet, or (b) a permissioned attestation contract that any party can call with a signed mainnet message.
+
+**Funding the mirror's testnet wallet.** ~50 testnet USDC from Circle faucet on Arc Testnet is plenty for the hackathon volume (sub-1-USDC trades).
+
+**Implementation scope.** Not building this yet. Punt to Phase 4 (after StoaSettler is live and the bot can call `bridge.polymarket.com/withdraw`). Estimated ~30 lines of TS in a CF Worker cron + ~15 lines for the audit log table.
+
+### Open items closed by this entry
+
+- [x] Does CCTP V2 attestation API accept Polygon-mainnet (7) → Arc-testnet (26)? **No.** Mirror service required.
+
+### Open items still open
+
+- [ ] USYC on Arc Testnet — confirmed deployed at `0xe9185F0c5F296Ed1797AaE4238D26CCaBEadb86C` (resolved 2026-05-14 earlier via docs.arc.io/arc/references/contract-addresses).
+- [ ] Confirm Polymarket builder fee transfer is atomic-on-settlement vs batched (still requires live trade observation).
+- [ ] Read `api-reference/geoblock.md` before wiring up the bot.
+- [ ] Apply for Polymarket Verified tier (day-2 todo, email `builder@polymarket.com`).
+
+---
+
 ## 2026-05-14 (late) — Phase 1 kickoff: clarifications & contract address table
 
 ### Key clarification: operator funding model

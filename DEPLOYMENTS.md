@@ -6,22 +6,22 @@ Canonical record of Stoa's deployed contracts. Update this file every time somet
 
 ## Arc Testnet (chain ID `5042002`)
 
-### Stoa Phase 1 contracts (2026-05-14)
+### Stoa contracts on Arc Testnet
 
-| Contract | Address | Deploy tx |
-|---|---|---|
-| **Splitter** | [`0x114942B5FeebFDf9F1FA2F161eA9C2A1754C407F`](https://testnet.arcscan.app/address/0x114942B5FeebFDf9F1FA2F161eA9C2A1754C407F) | [`0xb8f2e334…04adc29`](https://testnet.arcscan.app/tx/0xb8f2e3342abcfbf62571d79b95b86c0bc8dd490782707f7e06428be4104adc29) |
-| **TracePin** | [`0x657355b621494C5F99253ce9A4c2cE8B9b488B7B`](https://testnet.arcscan.app/address/0x657355b621494C5F99253ce9A4c2cE8B9b488B7B) | [`0xb3131e75…c10f101c7`](https://testnet.arcscan.app/tx/0xb3131e755773ac6db3267151abba679b69f7d6fd3500ebb2e16801fc10f101c7) |
+| Contract | Address | Deploy tx | Block | Gas |
+|---|---|---|---|---|
+| **Splitter** | [`0x114942B5FeebFDf9F1FA2F161eA9C2A1754C407F`](https://testnet.arcscan.app/address/0x114942B5FeebFDf9F1FA2F161eA9C2A1754C407F) | [`0xb8f2e334…04adc29`](https://testnet.arcscan.app/tx/0xb8f2e3342abcfbf62571d79b95b86c0bc8dd490782707f7e06428be4104adc29) | 42,463,956 | 421,196 |
+| **TracePin** | [`0x657355b621494C5F99253ce9A4c2cE8B9b488B7B`](https://testnet.arcscan.app/address/0x657355b621494C5F99253ce9A4c2cE8B9b488B7B) | [`0xb3131e75…c10f101c7`](https://testnet.arcscan.app/tx/0xb3131e755773ac6db3267151abba679b69f7d6fd3500ebb2e16801fc10f101c7) | 42,463,962 | 132,667 |
+| **StoaSettler** | [`0x05a98A1dCa17917B6e8B19306c1653fA9FC5d689`](https://testnet.arcscan.app/address/0x05a98A1dCa17917B6e8B19306c1653fA9FC5d689) | [`0x25beedde…cb749`](https://testnet.arcscan.app/tx/0x25beeddea893e03b2b9d97db8e7cc791c1706a6f0939f46847f8fccc2edcb749) | 42,466,083 | 614,962 |
 
 **Deploy details**
 - Deployer: `0x5342ac8383c39bf680a4035C02EcACdc8E412435` (generated via `cast wallet new`, key in local `.env`)
-- Source commit: `2b10662` (the `.gitignore + .env.example` initial-hygiene commit)
-- Splitter gas used: 421,196 (block `0x283f2d4` = 42,463,956)
-- TracePin gas used: 132,667 (block `0x283f2da` = 42,463,962)
-- Effective gas price: ~20 gwei (`0x4a8270a40`)
-- Total deploy cost: 0.011 USDC (deployer went from 20.000 → 19.989 USDC)
-- Verified post-deploy: `Splitter.BPS_DENOMINATOR()` returned `10000`; TracePin has code at the address.
-- Solc version: `0.8.24`, optimizer on (200 runs), no via-IR.
+- Splitter + TracePin deployed from commit `2b10662`. StoaSettler deployed from commit `f717b90` (the via_ir-enabled build).
+- StoaSettler is wired to: USDC `0x3600000000000000000000000000000000000000`, Splitter `0x1149…407F`, TracePin `0x6573…8B7B`. Constructor args captured in `broadcast/DeployStoaSettler.s.sol/5042002/run-latest.json`.
+- Effective gas price ~20 gwei (`0x4a8270a40`) for all three.
+- Total deploy cost so far: ~0.024 USDC across all three contracts.
+- Solc `0.8.24`, optimizer 200 runs. **via_ir enabled** after StoaSettler triggered stack-too-deep on the 9-arg `transferWithAuthorization` call.
+- Post-deploy verifications: `Splitter.BPS_DENOMINATOR()` = `10000`; TracePin and StoaSettler both have non-zero `eth_getCode` length.
 
 ### Reference contracts on Arc Testnet (sourced from docs.arc.io, not deployed by us)
 

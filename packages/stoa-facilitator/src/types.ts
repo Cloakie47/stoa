@@ -1,4 +1,7 @@
 import type { NonceStore } from "./nonce/types.js";
+import type { StoaSplitConfig } from "./schemes/evm/stoa-split.js";
+
+export type { StoaSplitConfig };
 
 /**
  * EVM chain configuration for the facilitator.
@@ -31,6 +34,9 @@ export interface FacilitatorConfig {
   evm?: EvmConfig;
   /** SVM (Solana) chain configuration. Omit to disable Solana support. */
   svm?: SvmConfig;
+  /** Stoa split-settlement scheme — atomic verify+split+settle via StoaSettler.
+   *  Layered on top of the upstream `evm` scheme; can be configured independently. */
+  stoaSplit?: StoaSplitConfig;
   /** Pluggable nonce store for replay protection. Defaults to in-memory. */
   nonceStore?: NonceStore;
 }
