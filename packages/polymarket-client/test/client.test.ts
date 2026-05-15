@@ -22,6 +22,7 @@ const getBuilderTradesMock = vi.fn();
 const getTickSizeMock = vi.fn();
 const getNegRiskMock = vi.fn();
 const getOrderBookMock = vi.fn();
+const getOpenOrdersMock = vi.fn();
 const createOrDeriveApiKeyMock = vi.fn();
 
 vi.mock("@polymarket/clob-client-v2", () => {
@@ -33,6 +34,7 @@ vi.mock("@polymarket/clob-client-v2", () => {
     getTickSize = getTickSizeMock;
     getNegRisk = getNegRiskMock;
     getOrderBook = getOrderBookMock;
+    getOpenOrders = getOpenOrdersMock;
     createOrDeriveApiKey = createOrDeriveApiKeyMock;
   }
   const SignatureTypeV2 = { EOA: 0, POLY_PROXY: 1, POLY_GNOSIS_SAFE: 2, POLY_1271: 3 };
@@ -91,6 +93,7 @@ beforeEach(() => {
   getTickSizeMock.mockReset();
   getNegRiskMock.mockReset();
   getOrderBookMock.mockReset();
+  getOpenOrdersMock.mockReset();
   createOrDeriveApiKeyMock.mockReset();
   // Default Gamma stub: /markets returns one binary market.
   originalFetch = globalThis.fetch;
@@ -391,5 +394,53 @@ describe("StoaPolymarketClient.getBuilderTrades", () => {
   it("throws if no builder code is configured or passed", async () => {
     const client = new StoaPolymarketClient({ privateKey: PK });
     await expect(client.getBuilderTrades()).rejects.toThrow(/builderCode/);
+  });
+});
+
+describe("StoaPolymarketClient.getOpenOrders", () => {
+  it("forwards the params to the SDK and returns the flat array", async () => {
+    const fixture = [
+      {
+        id: "0xord_abc",
+        status: "LIVE",
+        owner: "k",
+        maker_address: "0xaaaa000000000000000000000000000000000001",
+        market: COND_ID,
+        asset_id: YES_TOKEN,
+        side: "BUY",
+        original_size: "1.37",
+        size_matched: "0",
+        price: "0.73",
+        associate_trades: [],
+        outcome: "Yes",
+        created_at: 1778850590,
+        expiration: "0",
+        order_type: "GTC",
+      },
+    ];
+    getOpenOrdersMock.mockResolvedValue(fixture);
+    createOrDeriveApiKeyMock.mockResolvedValue({
+      key: "k",
+      secret: "s",
+      passphrase: "p",
+    });
+
+    const client = new StoaPolymarketClient({ privateKey: PK, builderCode: BUILDER });
+    const orders = await client.getOpenOrders({ market: COND_ID });
+    expect(getOpenOrdersMock).toHaveBeenCalledWith({ market: COND_ID });
+    expect(orders).toEqual(fixture);
+  });
+
+  it("defaults params to {} when none are supplied", async () => {
+    getOpenOrdersMock.mockResolvedValue([]);
+    createOrDeriveApiKeyMock.mockResolvedValue({
+      key: "k",
+      secret: "s",
+      passphrase: "p",
+    });
+    const client = new StoaPolymarketClient({ privateKey: PK, builderCode: BUILDER });
+    const orders = await client.getOpenOrders();
+    expect(getOpenOrdersMock).toHaveBeenCalledWith({});
+    expect(orders).toEqual([]);
   });
 });

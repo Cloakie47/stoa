@@ -35,6 +35,8 @@ import {
   type BuilderTrade,
   type BuilderTradesResponse,
   type CreateOrderOptions,
+  type OpenOrder,
+  type OpenOrderParams,
   type OrderBookSummary,
   type SignedOrder,
   type TickSize,
@@ -497,6 +499,17 @@ export class StoaPolymarketClient {
     const authed = await this.getAuthedClient();
     await authed.cancelOrder({ orderID: orderId });
   }
+
+  /**
+   * List open (live in the book, not yet filled or cancelled) orders. Filter
+   * by `market` (conditionId), `asset_id` (CTF token id), or a single `id`.
+   * Returns a flat list — pagination collapsed by the SDK's default behavior.
+   */
+  async getOpenOrders(params: OpenOrderParams = {}): Promise<OpenOrder[]> {
+    const authed = await this.getAuthedClient();
+    const resp = (await authed.getOpenOrders(params)) as OpenOrder[];
+    return resp;
+  }
 }
 
 // ── Helpers (Gamma URL → conditionId resolution) ─────────────────────────────
@@ -626,6 +639,8 @@ export {
   Side,
   SignatureTypeV2,
   type BuilderTrade,
+  type OpenOrder,
+  type OpenOrderParams,
   type SignedOrder,
   type TickSize,
 };

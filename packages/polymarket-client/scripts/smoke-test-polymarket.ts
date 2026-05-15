@@ -154,11 +154,44 @@ async function main() {
   console.log(`\n── EIP-712 typed data (this is what got signed) ───────────`);
   console.log(JSON.stringify(prepared.typedData, null, 2));
 
+  const submit = process.argv.includes("--submit");
+  if (!submit) {
+    console.log(`\n╔══════════════════════════════════════════════════════════════╗`);
+    console.log(`║  REVIEW THE ABOVE CAREFULLY. The order is SIGNED but NOT     ║`);
+    console.log(`║  POSTED. Re-run with --submit to actually post to CLOB, OR   ║`);
+    console.log(`║  call client.submitOrder(prepared) from your own script.     ║`);
+    console.log(`╚══════════════════════════════════════════════════════════════╝\n`);
+    return;
+  }
+
+  // ── --submit branch ──────────────────────────────────────────────────────
+
   console.log(`\n╔══════════════════════════════════════════════════════════════╗`);
-  console.log(`║  REVIEW THE ABOVE CAREFULLY. The order is SIGNED but NOT     ║`);
-  console.log(`║  POSTED. Re-run with --submit to actually post to CLOB, OR   ║`);
-  console.log(`║  call client.submitOrder(prepared) from your own script.     ║`);
+  console.log(`║   --submit FLAG SET — posting to Polymarket CLOB now         ║`);
+  console.log(`║   This is a REAL submission on Polygon mainnet.              ║`);
   console.log(`╚══════════════════════════════════════════════════════════════╝\n`);
+
+  console.log("[smoke] Calling submitOrder(prepared)...");
+  const { orderId, raw } = await client.submitOrder(prepared);
+  console.log(`[smoke] ✓ orderId: ${orderId}`);
+  console.log(`[smoke] raw CLOB response: ${JSON.stringify(raw, null, 2)}\n`);
+
+  console.log(`[smoke] Querying getOpenOrders({ market: ${market.conditionId} })...`);
+  const openOrders = await client.getOpenOrders({ market: market.conditionId });
+  console.log(`[smoke] ✓ ${openOrders.length} open order(s) for this market:`);
+  for (const o of openOrders) {
+    console.log(JSON.stringify(o, null, 2));
+  }
+
+  // Polymarket UI URL (the operator wants to see this in the live book).
+  const uiMarketUrl = `https://polymarket.com/market/${market.slug}`;
+  console.log(`\n── Polymarket UI ──────────────────────────────────────────────`);
+  console.log(`Market page:    ${uiMarketUrl}`);
+  console.log(`Original event: ${FIGURE_F03_URL}`);
+  console.log(`\nNote: CLOB orders do NOT post on-chain at submission. There is no`);
+  console.log(`Polygonscan tx hash for the submission itself — only later if it`);
+  console.log(`matches and settles. The orderId above is the off-chain CLOB ID.`);
+  console.log(`\n[smoke] Order submitted and visible. Not cancelling.`);
 }
 
 function decimalsFromTick(tick: string): number {
