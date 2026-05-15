@@ -114,24 +114,26 @@ describe("computeJudgeRecommendation (Kelly-based sizing)", () => {
   });
 
   it(
-    "(f) Starmer case (literal spec: model_p_yes=0.32, market_p_yes=0.945) → recommends NO, not PASS",
+    "test_hypothetical_inverted_market_prices: (model_p_yes=0.32, market_p_yes=0.945) → recommends NO at $16.53",
     () => {
-      // NOTE ON SPEC INCONSISTENCY:
+      // This is a FORMULA-CORRECTNESS check, NOT a Starmer simulation.
       //
-      // The user's task description specifies (model_p_yes = 0.32, market_p_yes
-      // = 0.945) and asserts it "must return PASS". But under the exact formula
-      // also given in the spec, this case yields:
-      //   edge_no = 0.945 - 0.32 = +0.625 (a HUGE positive NO edge)
+      // The original spec for this test asked for "the Starmer case" but
+      // accidentally flipped market_p_yes ↔ (1 − market_p_yes). The real
+      // Starmer market had market_p_yes = 0.055 (5.5¢ YES price), NOT 0.945.
+      // The (0.32, 0.945) hypothetical describes a different market entirely:
+      // one where the MARKET is strongly bullish (94.5¢ YES) while the model
+      // thinks YES is unlikely (32%) — i.e., model thinks the market is
+      // overpriced.
+      //
+      // Under the spec's own formula:
+      //   edge_no = 0.945 - 0.32 = +0.625 (huge positive NO edge)
       //   kelly = 0.625 / 0.945 ≈ 0.661
       //   size = 100 × min(0.25 × 0.661, 0.20) = 100 × 0.165 = $16.53
-      // → NO with $16.53, not PASS.
+      // → NO with $16.53. The asserted output below matches the formula.
       //
-      // PASS would happen only if (i) edge were sub-dust, (ii) probabilities
-      // were equal, or (iii) an additional gate were added (none specified).
-      //
-      // We test what the formula PRODUCES rather than what the user spec asks
-      // for, and surface the discrepancy in the run report. See test (f2)
-      // below for the REAL Starmer numbers from the actual buggy run.
+      // The canonical Starmer-bug regression test is test_starmer_real_market
+      // below — that's the one to read for "did we actually fix the bug?".
       const r = computeJudgeRecommendation({
         model_p_yes: 0.32,
         market_p_yes: 0.945,
@@ -144,7 +146,7 @@ describe("computeJudgeRecommendation (Kelly-based sizing)", () => {
     },
   );
 
-  it("(f2) Starmer REAL numbers (model_p_yes=0.32, market_p_yes=0.055) → recommends YES, replacing the old buggy NO", () => {
+  it("test_starmer_real_market: (model_p_yes=0.32, market_p_yes=0.055) → recommends YES at $7.01, replacing the old buggy $10 NO", () => {
     // The actual Starmer run had market_p_yes = 0.055 (5.5¢ YES price), with the
     // buggy old logic recommending $10 NO. Under the new Kelly-aware logic:
     //   edge_yes = 0.32 - 0.055 = +0.265 (positive YES edge)
