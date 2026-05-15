@@ -43,5 +43,8 @@ export const VALID_JUDGE_FIELDS = {
     historical: { signal: "YES" as const, confidence: 60 },
     market_structure: { signal: "YES" as const, confidence: 50 },
   },
-  recommended_size_usdc: 15,
+  /** Model's probability of YES. Drives the orchestrator's Kelly + sizing. */
+  model_probability_yes: 0.62,
+  /** Ignored by orchestrator now — the size is derived. Kept for schema compliance. */
+  recommended_size_usdc: 0,
 };

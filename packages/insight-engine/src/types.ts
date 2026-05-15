@@ -63,8 +63,15 @@ export interface AgentTrace {
 }
 
 /**
- * Judge trace adds explicit agreement/disagreement analysis on top of
- * the AgentTrace shape.
+ * Judge trace adds explicit agreement/disagreement analysis + market-price-
+ * aware sizing on top of the AgentTrace shape.
+ *
+ * `signal` and `recommended_size_usdc` on a JudgeTrace are DERIVED in code
+ * from `model_probability_yes` + `market_price_yes` (via the Kelly formula
+ * in src/agents/judge.ts → `computeJudgeRecommendation`). The Judge model
+ * outputs its own signal too, but the orchestrator overrides it to make sure
+ * negative-EV trades never get a non-zero size — the model is advisory, the
+ * formula is authoritative.
  */
 export interface JudgeTrace extends AgentTrace {
   agent: "judge";
@@ -72,7 +79,21 @@ export interface JudgeTrace extends AgentTrace {
   disagreement_analysis: string;
   /** Per-agent (signal, confidence) snapshot — used for the audit trail. */
   agent_signals: Record<string, { signal: Signal; confidence: number }>;
-  /** Recommended position size in USDC (0 if signal is PASS). */
+  /** The Judge's aggregated estimate of P(YES) in [0, 1]. Key input for sizing. */
+  model_probability_yes: number;
+  /** The market's YES contract price at analysis time, in [0, 1]. */
+  market_price_yes: number;
+  /** Derived: model_probability_yes - market_price_yes. */
+  edge_yes: number;
+  /** Derived: market_price_yes - model_probability_yes. */
+  edge_no: number;
+  /**
+   * Derived: raw (full) Kelly fraction for the winning side, in [0, 1].
+   * The actual `recommended_size_usdc` uses quarter-Kelly with a 20% cap.
+   * 0 if `signal` is PASS.
+   */
+  kelly_fraction: number;
+  /** Derived position size in USDC (0 if PASS). */
   recommended_size_usdc: number;
 }
 

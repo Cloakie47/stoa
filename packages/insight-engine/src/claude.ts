@@ -150,6 +150,11 @@ export const JUDGE_TRACE_JSON_SCHEMA = {
       description:
         "Plain-text reasoning about where the 4 agents agreed and disagreed, and how you resolved disagreements.",
     },
+    model_probability_yes: {
+      type: "number" as const,
+      description:
+        "Your aggregated estimate of P(YES) in [0, 1]. THIS IS THE KEY INPUT FOR SIZING — the orchestrator computes Kelly + edge from this value vs the market price. Calibrate carefully: this is not just a hand-wave of your confidence, it's a real probability the orchestrator will use to size a trade.",
+    },
     agent_signals: (() => {
       // Named-keys schema for the 4 specialists. Structured outputs disallow
       // `additionalProperties: <object>` — we have to enumerate explicitly.
@@ -184,6 +189,7 @@ export const JUDGE_TRACE_JSON_SCHEMA = {
   },
   required: [
     ...AGENT_TRACE_JSON_SCHEMA.required,
+    "model_probability_yes",
     "disagreement_analysis",
     "agent_signals",
     "recommended_size_usdc",

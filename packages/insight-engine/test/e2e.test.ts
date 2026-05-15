@@ -18,11 +18,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import {
-  analyzeMarket,
-  computeKellyFraction,
-  fetchMarketContext,
-} from "../src/index.js";
+import { analyzeMarket, fetchMarketContext } from "../src/index.js";
 import type { MarketContext } from "../src/types.js";
 
 // Load .env from repo root so DEPLOYER_PRIVATE_KEY etc. are available.
@@ -190,28 +186,28 @@ describe.skipIf(skip)("analyzeMarket — real LLM + Polymarket integration", () 
       const presentAgents = new Set(result.trace.agent_traces.map((t) => t.agent));
       const failedAgents = expectedAgents.filter((a) => !presentAgents.has(a));
 
-      const subjectiveProb = result.trace.final_confidence / 100;
+      const j = result.trace.judge_trace;
       const currentYesPrice = context.current_yes_price ?? 0;
-      const kelly = computeKellyFraction({
-        signal: result.trace.final_signal,
-        subjective_probability: subjectiveProb,
-        current_yes_price: currentYesPrice,
-      });
 
       console.log("\n========== E2E ANALYSIS RESULT ==========");
       console.log(`URL:                ${result.trace.market_url}`);
       console.log(`Question:           ${result.trace.market_question}`);
       console.log(
-        `Current YES price:  ${currentYesPrice ? `${(currentYesPrice * 100).toFixed(1)}¢` : "(unknown)"}`,
+        `Current YES price:  ${currentYesPrice ? `${(currentYesPrice * 100).toFixed(1)}¢` : "(unknown)"} (market_p_yes=${currentYesPrice.toFixed(4)})`,
+      );
+      console.log(
+        `Model probability:  ${(j.model_probability_yes * 100).toFixed(1)}% (model_p_yes=${j.model_probability_yes.toFixed(4)})`,
+      );
+      console.log(
+        `Edge YES:           ${(j.edge_yes * 100).toFixed(2)}¢/share  | Edge NO: ${(j.edge_no * 100).toFixed(2)}¢/share`,
+      );
+      console.log(
+        `Kelly fraction:     ${(j.kelly_fraction * 100).toFixed(2)}% (full Kelly; we use quarter-Kelly with 20% cap)`,
       );
       console.log(`Final signal:       ${result.trace.final_signal}`);
+      console.log(`Judge confidence:   ${j.confidence} / 100 (meta-uncertainty about model_p_yes)`);
       console.log(
-        `Final confidence:   ${result.trace.final_confidence} / 100`,
-      );
-      console.log(`Subjective prob:    ${(subjectiveProb * 100).toFixed(1)}%`);
-      console.log(`Kelly fraction:     ${(kelly * 100).toFixed(2)}% of bankroll`);
-      console.log(
-        `Capped size USDC:   $${result.trace.recommended_size_usdc.toFixed(2)} (orchestrator cap = 20% of $${userBalanceUsdc})`,
+        `Recommended size:   $${result.trace.recommended_size_usdc.toFixed(2)} (= balance × min(kelly × 0.25, 0.20))`,
       );
       console.log(
         `Total spend:        $${result.cost_usd.toFixed(4)} (${(result.cost_usd * 100).toFixed(2)}¢)`,
