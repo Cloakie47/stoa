@@ -392,3 +392,76 @@ By extension, any developer onboarding Polymarket as a payment leg via Circle's 
 - **2026-05-15 → 2026-05-22:** continue smoke testing and Phase 5 wallet wiring; trades on Polymarket mainnet in this window earn $0 fees but still produce attribution rows in `getBuilderTrades()` that we can show judges as proof-of-flow.
 - **2026-05-22 13:02 UTC:** as soon as the cooldown clears, set `builder_taker_fee_bps = X` and `builder_maker_fee_bps = Y` (TBD — pick conservative values well under the 100/50 bps caps to avoid being noticeably more expensive than competing front-ends). Lock in the rates before the demo recording.
 - After this initial update, treat the 7-day cooldown as load-bearing: don't tweak rates again unless we genuinely have to.
+
+---
+
+## Polymarket V2 Proxy Wallet Requirement (2026-05-15)
+
+The Phase-4 live submission attempt surfaced this: **Polymarket V2 CLOB rejects direct EOA orders on mainnet.** Every signed order we tried (V2 EIP-712, valid signature, valid builder code) was rejected at the API layer with HTTP 400 and:
+
+```
+{"error":"maker address not allowed, please use the deposit wallet flow","status":400}
+```
+
+…even though wallet state was fully set up (pUSD held by the EOA, MaxUint256 allowances to both standard and neg-risk CTF Exchange V2 contracts, valid POL for gas).
+
+### What's actually required
+
+The CLOB rate-limits `maker` addresses by their *registration path*. Three signature types exist:
+
+| value | name | maker = | accepted on mainnet? |
+|---|---|---|---|
+| 0 | `EOA` | EOA itself | ❌ rejected |
+| 1 | `POLY_PROXY` | Magic-link proxy wallet (UI sign-up flow) | ✅ |
+| 2 | `POLY_GNOSIS_SAFE` | Gnosis Safe-style proxy (self-custody connect flow) | ✅ |
+| 3 | `POLY_1271` | EIP-1271 smart-contract signature wallet | ✅ (this is what we want for Phase 5) |
+
+The EOA-direct path (`signatureType = 0`, `maker = signer = EOA`) appears to be reserved for SDK testing — production CLOB rejects it. Maker has to be a proxy/safe/1271 contract registered through Polymarket's deposit flow, which:
+
+1. Deploys a deterministic proxy contract for the EOA (via Polymarket's factory at `0x00000000000Fb5C9ADea0298D729A0CB3823Cc07`).
+2. Registers the proxy in Polymarket's `Deposit Wallet` registry.
+3. Funds the proxy with pUSD (the UI handles the USDC → USDC.e → pUSD path inside the proxy).
+4. Sets allowances *from the proxy* to the CTF Exchange V2 contracts.
+
+After that, orders signed by the EOA but with `maker = proxy_address` and `signatureType = 1, 2, or 3` are accepted.
+
+### What the smoke test does and doesn't prove
+
+**Proven (gold by the operator-gated smoke test):**
+
+- V2 EIP-712 typed data is reconstructed correctly in `packages/polymarket-client` (11-field Order, domain version 2, all V2 fields surfaced).
+- Order is signed correctly — signature recovers to the EOA we configured.
+- Builder code is attached on the `builder` bytes32 field (`0xff2fdfbfe1…`).
+- pUSD is held + approved on Polygon mainnet to both standard and neg-risk exchange V2 contracts.
+- Polygon mainnet setup script (`setup-pusd.ts`) is idempotent and works end-to-end: 4 mainnet txs total cost 0.074 POL gas (~$0.04).
+
+**Not proven:**
+
+- Live order acceptance on the CLOB. The path is gated on the proxy-wallet registration step we did not perform with the deployer EOA.
+
+### Why we're deferring rather than completing the proxy flow
+
+The cleanest path to a registered proxy involves logging the deployer EOA into the polymarket.com UI (browser wallet), which would mean exporting the deployer's hot private key into MetaMask. Marginal demo value (a single $1 order sitting in the book) is not worth the operational risk or the ~1-2 hours to script around it.
+
+**Phase 5 obviates this entirely.** When users deposit through the Telegram bot, their funds land in a Circle Embedded Wallet — an ERC-4337 smart account that signs via EIP-1271. That's `signatureType = 3 (POLY_1271)`, which is the same flow Polymarket's docs recommend as the modern path for new integrations. The user's Circle wallet IS the deposit wallet from Polymarket's perspective; no separate proxy registration step.
+
+So the Phase-4 deferral isn't a gap — it's a deliberate choice not to duplicate work that the production user flow solves natively.
+
+### Feedback-incentive angle (Circle developer tooling, $500)
+
+Two surfaces worth flagging:
+
+1. **Polymarket docs.** The "deposit wallet" requirement is mentioned in V2's onboarding flow but the docs don't clearly say "direct EOA orders are rejected on mainnet." A developer building an agentic/programmatic integration from scratch will spend hours on this. One sentence in the order-submission docs ("Orders must be submitted from a registered deposit wallet — see [link]") would have saved the entire afternoon. Suggested copy already drafted; will submit to feedback@polymarket.com after the hackathon.
+2. **Circle's Polymarket story.** Circle's Embedded Wallets are a *natural* fit for Polymarket's POLY_1271 path — every Circle smart account is already an EIP-1271 signer. Circle's quickstart for "Polymarket on Circle" (if/when it exists) should make this an explicit two-step recipe: (a) provision a Circle wallet, (b) register as a Polymarket deposit wallet by depositing through `bridge.polymarket.com` from the Circle wallet address. Stoa's Phase 5 will validate this flow live; we can write up the recipe for Circle's docs as part of the hackathon feedback submission.
+
+### Wallet state after deferral
+
+Deployer `0x5342ac8383c39bf680a4035C02EcACdc8E412435` is left in this state — useful to know if we ever resume this path:
+
+- 19.78 POL (gas headroom for any future Polygon-mainnet operator action)
+- 0 USDC.e (wrapped)
+- 4.99 pUSD (sitting in the EOA — would need to be transferred to a registered proxy to be tradeable)
+- MaxUint256 allowance pUSD → standard CTF Exchange V2
+- MaxUint256 allowance pUSD → neg-risk CTF Exchange V2
+
+If we ever resurrect the operator-EOA submission path (e.g., for a one-off mainnet trade signed by Stoa rather than by a user), the work needed is: deposit the EOA into Polymarket via UI to deploy a proxy, transfer 4.99 pUSD to the proxy, set proxy-side allowances, then re-run smoke:submit with `signatureType` switched to 1 or 2 and `funderAddress` pointed at the proxy.

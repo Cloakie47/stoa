@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 import {
   createPublicClient,
   createWalletClient,
+  getAddress,
   http,
   maxUint256,
   type Address,
@@ -36,12 +37,14 @@ import { privateKeyToAccount } from "viem/accounts";
 import { polygon } from "viem/chains";
 
 // ── Polygon mainnet addresses (verified on-chain 2026-05-15) ────────────────
+// Wrapped in getAddress() so EIP-55 checksum is normalized at startup —
+// avoids viem's strict mixed-case validation rejecting hand-typed addresses.
 
-const USDCE: Address = "0x2791Bca1f2de4661ED88A30C99a7a9449Aa84174";
-const PUSD: Address = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
-const ONRAMP: Address = "0x93070a847efEf7F70739046A929D47a521F5B8ee";
-const EXCHANGE_V2: Address = "0xE111180000d2663C0091e4f400237545B87B996B";
-const NEG_RISK_EXCHANGE_V2: Address = "0xe2222d279d744050d28e00520010520000310F59";
+const USDCE: Address = getAddress("0x2791bca1f2de4661ed88a30c99a7a9449aa84174");
+const PUSD: Address = getAddress("0xc011a7e12a19f7b1f670d46f03b03f3342e82dfb");
+const ONRAMP: Address = getAddress("0x93070a847efef7f70739046a929d47a521f5b8ee");
+const EXCHANGE_V2: Address = getAddress("0xe111180000d2663c0091e4f400237545b87b996b");
+const NEG_RISK_EXCHANGE_V2: Address = getAddress("0xe2222d279d744050d28e00520010520000310f59");
 
 // ── ABIs ────────────────────────────────────────────────────────────────────
 
