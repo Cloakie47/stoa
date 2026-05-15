@@ -1,6 +1,61 @@
 # NOTES.md — running architecture log
 
-Living document for architecture decisions and the reasons behind them. Newest entry at the top. Pair with `RESEARCH_POLYMARKET.md` for source citations.
+Living document for architecture decisions and the reasons behind them. Newest entry at the top. Pair with `RESEARCH_POLYMARKET.md` and `RESEARCH_CIRCLE_POLYMARKET.md` for source citations.
+
+---
+
+## 2026-05-16 — Phase 5 architecture approved with three modifications
+
+Phase 5 (Telegram bot + Circle Embedded Wallets) is greenlit per the proposal in chat. Three operator-driven modifications applied before any code is written.
+
+### Modification 1: rejected fallback — shared-operator-EOA
+
+The original spike-failure contingency listed "single operator EOA signs all users' orders" as Plan B. **This pattern is rejected.** Reasons:
+
+1. **Looks like market manipulation.** One address placing many trades on behalf of many users — even if every order was a sincere user request — creates the on-chain appearance of coordinated activity. Polymarket monitoring, exchange rules, and any later regulatory attention treat one high-volume address differently from N independent addresses. The pattern is indistinguishable from a single actor running multiple personas to move prices.
+2. **Degrades the custody story.** Stoa's pitch is "your funds, your wallet, intelligence served on top." That fundamentally requires per-user wallets. Intermingling user funds in an operator wallet makes the bot a custodian-of-record for pooled funds and changes the regulatory posture.
+3. **Builder code attribution doesn't require it.** Per-user wallets attribute to the same builder code without any sharing. The fallback's only "benefit" (a single signer for all orders) provides nothing the per-user design can't.
+
+**Replacement spike-failure contingencies (in priority order):**
+- (a) Try **Circle Modular Wallets (MSCA)** as the owner instead of Circle EOA. Accept the cost of validating Polymarket's 1271-chaining behavior.
+- (b) **Scope-down to no-on-chain-submit:** ship the bot with insight-engine + Splitter + trace pinning, mock the Polymarket order submission as a "you would have placed this order — open Polymarket UI to actually do it" hand-off. Loses the autonomous trading story but preserves everything else.
+
+### Modification 2: /analyze command + Stoa dogfooding the split
+
+Bot command tree is **/analyze → /preview → /confirm**, with a real on-chain fee at /analyze:
+
+- **`/analyze <url>`** runs `insight-engine.analyzeMarket()` against the URL, pins FullTrace to Arc + IPFS, and returns a summary message. **Costs $0.10 USDC** paid from the user's Circle wallet, settled via the Stoa `stoa-split-evm` scheme through `StoaSettler` on Arc testnet:
+  - `$0.07` → operator treasury address
+  - `$0.02` → insight-engine maintainers address
+  - `$0.01` → Canteen/Agora pool address
+  Split is atomic in the StoaSettler call. Trace pin happens after the split clears. **This makes the bot a real Stoa client, not a special-case freeloader.**
+- **`/preview`** shows the analysis output formatted as a confirmable order (token, side, price, size, max loss). No additional fee.
+- **`/confirm`** submits the prepared order to Polymarket CLOB. Builder-code attribution captures the Polymarket revenue. No additional /confirm fee — the Polymarket builder fee is the revenue capture for this step.
+
+**Open architectural detail (defer to Phase 5 implementation):** /analyze fee lives on Arc, Polymarket trades live on Polygon. Likely path: provision each user's Circle wallet on **both** chains (Circle's `blockchains: ["MATIC", "ARC-TESTNET"]` does this in one API call), so the user has a Polygon balance for Polymarket and an Arc balance for the /analyze fee. Settles cleanly; avoids cross-chain bridging on every analysis call. Verify Circle supports Arc Testnet during the spike.
+
+### Modification 3: /confirm UX requirements
+
+Every `/confirm` message must show inline:
+1. **Order details:** token, side, price, size, total exposure (USDC notional).
+2. **Current builder fee rate** read from the builder profile API at message-build time, with an explicit **cooldown-disclosure line** when we're still inside the cooldown window: *"Builder fee currently 0/0 bps; rate update unlocks 2026-05-22 13:02 UTC."* After the cooldown, drop the disclosure and just show the rate.
+3. **Max-loss line:** *"If this resolves against you, you lose: $X.XX"* — computed from size × (1 − limit_price) for a BUY, or size × limit_price for a SELL.
+4. **IPFS CID** for the FullTrace as an inline link to the gateway URL.
+5. **Arc tx hash** for the trace-pin tx as an inline link to the Arc explorer.
+
+These five lines are non-negotiable for /confirm — they are how the bot keeps the user informed enough to consent meaningfully, and how Stoa demonstrates the "auditable agent" story to judges.
+
+### Open questions answered
+
+- Storage: D1.
+- Onboarding: strong disclosure that wallets are server-custodied; bot links to `/keys` (future export command, not in v0).
+- Funding: surface all three paths (raw deposit-wallet address for direct USDC sends, `bridge.polymarket.com` deeplink for other-chain bridging, manual instructions).
+- Trace surfacing: inline IPFS CID + Arc explorer link in every /confirm and /preview message.
+- Spike: start now, before bot scaffolding.
+
+### Next step
+
+Operator-only spike script: one Circle EOA + one Polymarket deposit wallet + one $1-3 V2 BUY order at limit-below-best-bid, signed via Circle's `signTypedData`, submitted with `signatureType=3 POLY_1271`. Cancel immediately. Budget: ~$3 of pUSD (recoverable on cancel) + a few cents in POL gas. No LLM spend.
 
 ---
 
