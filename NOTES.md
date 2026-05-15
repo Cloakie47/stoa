@@ -57,6 +57,22 @@ These five lines are non-negotiable for /confirm — they are how the bot keeps 
 
 Operator-only spike script: one Circle EOA + one Polymarket deposit wallet + one $1-3 V2 BUY order at limit-below-best-bid, signed via Circle's `signTypedData`, submitted with `signatureType=3 POLY_1271`. Cancel immediately. Budget: ~$3 of pUSD (recoverable on cancel) + a few cents in POL gas. No LLM spend.
 
+### Sig-type confusion resolved authoritatively: WALLET-CREATE deposit wallets = POLY_1271 (3)
+
+Resolved a discrepancy in the spike plan: the original instruction said `signatureType: 1 POLY_PROXY` but the V2 deposit-wallet path requires `signatureType: 3 POLY_1271`. The SDK's source code (`@polymarket/clob-client-v2@1.0.6`) is the authoritative answer. Three pieces of evidence converge:
+
+1. **Enum docstrings** in `dist/order-utils/model/signatureTypeV2.d.cts`:
+   - `POLY_PROXY = 1`: *"EIP712 signatures signed by EOAs that own Polymarket Proxy wallets"* — refers to the **legacy Magic-link Proxy product** (email sign-up flow), a different contract type deployed by a different factory.
+   - `POLY_1271 = 3`: *"EIP1271 signatures signed by smart contracts. To be used by smart contract wallets or vaults"* — refers to the **V2 deposit wallet**, which is the ERC-1967 proxy deployed by WALLET-CREATE that implements ERC-1271 + ERC-7739 validation.
+
+2. **The ERC-7739 wrapping code path** in `dist/order-utils/exchangeOrderBuilderV2.js`, function `buildOrderSignature`, fires only when `msg.signatureType === SignatureTypeV2.POLY_1271`. It produces the 317-byte envelope (`innerSig + appDomainSeparator + contentsHash + ORDER_TYPE_STRING + lenHex`) with inner typed data using the `"DepositWallet"` domain name and the deposit-wallet address as `verifyingContract`. That envelope is precisely what the V2 deposit wallet's `isValidSignature()` expects. The other three sig types (0/1/2) all skip the wrap and emit a plain EIP-712 signature, which the V2 deposit wallet rejects.
+
+3. **WALLET-CREATE factory `0x00000000000Fb5C9ADea0298D729A0CB3823Cc07`** is the V2 deposit-wallet factory (per [docs.polymarket.com/trading/deposit-wallets](https://docs.polymarket.com/trading/deposit-wallets)). Not the legacy Magic-link Polymarket Proxy factory. The same source explicitly says the deployed wallet uses ERC-1271 validation — i.e., POLY_1271 (3).
+
+The naming is genuinely confusing because "proxy" appears in both products and the V2 deposit wallet *is* technically an ERC-1967 proxy. The disambiguation: POLY_PROXY (1) is for the *historical Polymarket-branded* Magic-link product specifically. POLY_1271 (3) is the generic ERC-1271 path that the new V2 deposit wallet implements.
+
+Locked: **spike uses `SignatureTypeV2.POLY_1271 (3)`**. Documented here so Phase 5 bot code doesn't re-derive this from scratch.
+
 ---
 
 ## 2026-05-15 — insight-engine end-to-end working, first FullTrace pinned to Arc
