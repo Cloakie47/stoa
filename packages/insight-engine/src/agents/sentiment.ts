@@ -193,11 +193,18 @@ function buildToolset(): SentimentToolset {
 
   // Always include web_search as a fallback / supplemental — it surfaces
   // reddit, forum threads, and public X posts via Google indexing.
+  //
+  // `allowed_callers: ["direct"]` is REQUIRED for Haiku 4.5: web_search_20260209
+  // defaults to programmatic-tool-calling mode (code-exec container writes
+  // search calls), which Haiku 4.5 doesn't support. "direct" gives us the
+  // classic tool_use / tool_result loop instead. See NOTES.md for the
+  // discovery story.
   tools.push({
     type: "web_search_20260209",
     name: "web_search",
     max_uses: 4,
-  });
+    allowed_callers: ["direct"],
+  } as Anthropic.ToolUnion);
 
   return { tools, handlers };
 }

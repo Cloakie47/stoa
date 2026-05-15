@@ -31,6 +31,8 @@ interface GammaMarketRaw {
   endDateIso?: string;
   volume?: string | number;
   volumeNum?: number;
+  volume24hr?: string | number;
+  volume24hrNum?: number;
   active?: boolean;
   closed?: boolean;
   negRisk?: boolean;
@@ -153,6 +155,16 @@ export async function getEventBySlug(slug: string): Promise<GammaEventRaw> {
   return arr[0]!;
 }
 
+function parse24hVolume(m: GammaMarketRaw): number | undefined {
+  if (typeof m.volume24hrNum === "number") return m.volume24hrNum;
+  if (typeof m.volume24hr === "number") return m.volume24hr;
+  if (typeof m.volume24hr === "string") {
+    const n = Number.parseFloat(m.volume24hr);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
 function buildContextFromMarketRaw(
   url: string,
   raw: GammaMarketRaw,
@@ -180,6 +192,8 @@ function buildContextFromMarketRaw(
     current_yes_price: Number.isFinite(yesPrice) ? yesPrice : undefined,
     end_date: raw.endDateIso ?? raw.endDate,
     volume_usdc: parseVolume(raw),
+    volume_24h_usdc: parse24hVolume(raw),
+    condition_id: raw.conditionId,
     token_ids: {
       yes: yesTokenId,
       no: noTokenId,
@@ -322,49 +336,230 @@ export async function getPriceHistory(
 
 /**
  * Compact summary of orderbook depth for the agent's tool result.
- * Returns spread, best bid/ask, depth at top-5 levels each side.
+ *
+ * Returns top-3 levels per side as small numeric tuples (price, size_usdc)
+ * plus aggregate stats. Designed to stay small — total JSON ≈ 200-300 bytes
+ * per side, so a full tool response fits well under 1KB.
  */
 export interface OrderbookSummary {
   best_bid?: number;
   best_ask?: number;
+  mid?: number;
   spread_cents?: number;
-  bid_depth_5_levels_usdc: number;
-  ask_depth_5_levels_usdc: number;
-  total_bid_size_usdc: number;
-  total_ask_size_usdc: number;
+  /** Top-3 bid levels: [price, size_in_usdc] descending. */
+  top_bids: Array<[number, number]>;
+  /** Top-3 ask levels: [price, size_in_usdc] ascending. */
+  top_asks: Array<[number, number]>;
+  /** USDC value of top-3 levels each side. */
+  bid_depth_top3_usdc: number;
+  ask_depth_top3_usdc: number;
 }
 
 export function summarizeOrderbook(book: Orderbook): OrderbookSummary {
-  const parseLevel = (l: OrderbookLevel) => ({
-    price: Number.parseFloat(l.price),
-    size: Number.parseFloat(l.size),
-  });
-  // Polymarket returns bids sorted descending, asks ascending — we still
-  // sort defensively in case that changes.
+  const parseLevel = (l: OrderbookLevel): [number, number] => {
+    const price = Number.parseFloat(l.price);
+    const size = Number.parseFloat(l.size);
+    return [price, Math.round(price * size * 100) / 100];
+  };
   const bids = book.bids
     .map(parseLevel)
-    .sort((a, b) => b.price - a.price);
+    .sort((a, b) => b[0] - a[0]);
   const asks = book.asks
     .map(parseLevel)
-    .sort((a, b) => a.price - b.price);
+    .sort((a, b) => a[0] - b[0]);
 
-  const bestBid = bids[0]?.price;
-  const bestAsk = asks[0]?.price;
+  const bestBid = bids[0]?.[0];
+  const bestAsk = asks[0]?.[0];
+  const mid =
+    bestBid !== undefined && bestAsk !== undefined
+      ? Math.round(((bestBid + bestAsk) / 2) * 10_000) / 10_000
+      : undefined;
   const spreadCents =
     bestBid !== undefined && bestAsk !== undefined
       ? Math.round((bestAsk - bestBid) * 100 * 100) / 100
       : undefined;
 
-  const sum = (levels: typeof bids, n: number) =>
-    levels.slice(0, n).reduce((acc, l) => acc + l.price * l.size, 0);
+  const top3Bids = bids.slice(0, 3);
+  const top3Asks = asks.slice(0, 3);
+  const bidDepth = top3Bids.reduce((acc, [, s]) => acc + s, 0);
+  const askDepth = top3Asks.reduce((acc, [, s]) => acc + s, 0);
 
   return {
     best_bid: bestBid,
     best_ask: bestAsk,
+    mid,
     spread_cents: spreadCents,
-    bid_depth_5_levels_usdc: Math.round(sum(bids, 5) * 100) / 100,
-    ask_depth_5_levels_usdc: Math.round(sum(asks, 5) * 100) / 100,
-    total_bid_size_usdc: Math.round(sum(bids, bids.length) * 100) / 100,
-    total_ask_size_usdc: Math.round(sum(asks, asks.length) * 100) / 100,
+    top_bids: top3Bids,
+    top_asks: top3Asks,
+    bid_depth_top3_usdc: Math.round(bidDepth * 100) / 100,
+    ask_depth_top3_usdc: Math.round(askDepth * 100) / 100,
   };
+}
+
+/**
+ * Compute price-change percentages from a 1-day history series WITHOUT
+ * returning the raw array. The market_structure agent only needs to know
+ * "what's the price doing" — directional summaries are vastly more useful
+ * (and cheaper) than 100+ raw points.
+ */
+export interface PriceTrajectory {
+  current_price?: number;
+  /** Percentage move (signed) over the past hour, vs the closest point. */
+  pct_change_1h?: number;
+  /** Percentage move over the past 6 hours. */
+  pct_change_6h?: number;
+  /** Percentage move over the past 24 hours. */
+  pct_change_24h?: number;
+  /**
+   * One-word trajectory label based on volatility and direction over the
+   * trailing window. Useful for the agent's reasoning prose.
+   */
+  trajectory: "rising" | "falling" | "sideways" | "volatile" | "unknown";
+  /** Sample size used to derive these stats. */
+  num_points: number;
+}
+
+export function summarizePriceHistory(
+  history: PriceHistoryPoint[],
+): PriceTrajectory {
+  if (history.length === 0) {
+    return { trajectory: "unknown", num_points: 0 };
+  }
+  // History from CLOB comes in ascending time order; double-check.
+  const sorted = [...history].sort((a, b) => a.t - b.t);
+  const now = sorted[sorted.length - 1]!.t;
+  const current = sorted[sorted.length - 1]!.p;
+
+  const findAt = (secondsAgo: number): number | undefined => {
+    const target = now - secondsAgo;
+    // Find the point closest to target time, scanning backward.
+    let best = sorted[0]!;
+    let bestDist = Math.abs(best.t - target);
+    for (const p of sorted) {
+      const d = Math.abs(p.t - target);
+      if (d < bestDist) {
+        best = p;
+        bestDist = d;
+      }
+    }
+    // Only return if the closest sample is within 50% of the desired window
+    // (otherwise the comparison is meaningless — e.g. asking for 1h ago but
+    // only having a 6h-old data point).
+    if (bestDist > secondsAgo * 0.5 && secondsAgo > 0) return undefined;
+    return best.p;
+  };
+
+  const pct = (then: number | undefined): number | undefined => {
+    if (then === undefined || then === 0) return undefined;
+    return Math.round(((current - then) / then) * 10_000) / 100;
+  };
+
+  const c1h = pct(findAt(3_600));
+  const c6h = pct(findAt(21_600));
+  const c24h = pct(findAt(86_400));
+
+  // Trajectory heuristic: look at recent direction and dispersion.
+  let trajectory: PriceTrajectory["trajectory"] = "sideways";
+  if (c24h !== undefined) {
+    const minP = Math.min(...sorted.map((p) => p.p));
+    const maxP = Math.max(...sorted.map((p) => p.p));
+    const range = maxP - minP;
+    if (range > 0.15 && Math.abs(c24h) < 5) trajectory = "volatile";
+    else if (c24h > 3) trajectory = "rising";
+    else if (c24h < -3) trajectory = "falling";
+    else trajectory = "sideways";
+  }
+
+  return {
+    current_price:
+      current !== undefined
+        ? Math.round(current * 10_000) / 10_000
+        : undefined,
+    pct_change_1h: c1h,
+    pct_change_6h: c6h,
+    pct_change_24h: c24h,
+    trajectory,
+    num_points: sorted.length,
+  };
+}
+
+/**
+ * Trade snapshot from Polymarket's data-api. Public, no auth. Only the
+ * fields we use are typed — the upstream returns more.
+ */
+interface DataApiTrade {
+  /** USDC notional of the trade — `size` * `price`. */
+  size?: number;
+  price?: number;
+  taker?: string;
+  maker?: string;
+  side?: string;
+  timestamp?: number;
+}
+
+export interface FlowSummary {
+  /** Trades fetched (we cap at /trades?limit=N). */
+  trade_count_sampled: number;
+  /** Notional sum across the sampled trades, USDC. */
+  notional_total_usdc: number;
+  /** Trades whose notional exceeded $1000. */
+  large_trade_count_over_1000_usdc: number;
+  /** Largest single-trade notional in the sample. */
+  largest_trade_usdc?: number;
+  /** Trailing 24h volume — pulled from Gamma metadata, not the trades feed. */
+  volume_24h_usdc?: number;
+  /** Note if the trades endpoint was unreachable. */
+  trades_endpoint_error?: string;
+}
+
+/**
+ * Pull recent trades for a market via the data-api. Best-effort: if the
+ * endpoint errors, returns a partial FlowSummary with `trades_endpoint_error`
+ * populated so the agent's trace records that flow data was unavailable.
+ *
+ * @param conditionId The market's CTF conditionId (Gamma `conditionId` field).
+ * @param limit How many recent trades to sample.
+ */
+export async function getFlowSummary(
+  conditionId: string,
+  limit = 50,
+): Promise<FlowSummary> {
+  const url = `https://data-api.polymarket.com/trades?market=${encodeURIComponent(conditionId)}&limit=${limit}&takerOnly=true`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      return {
+        trade_count_sampled: 0,
+        notional_total_usdc: 0,
+        large_trade_count_over_1000_usdc: 0,
+        trades_endpoint_error: `data-api /trades returned ${res.status}`,
+      };
+    }
+    const body = (await res.json()) as DataApiTrade[];
+    const trades = Array.isArray(body) ? body : [];
+    let notional = 0;
+    let largeCount = 0;
+    let largest = 0;
+    for (const t of trades) {
+      if (typeof t.size !== "number" || typeof t.price !== "number") continue;
+      const usdc = t.size * t.price;
+      notional += usdc;
+      if (usdc > 1000) largeCount++;
+      if (usdc > largest) largest = usdc;
+    }
+    return {
+      trade_count_sampled: trades.length,
+      notional_total_usdc: Math.round(notional * 100) / 100,
+      large_trade_count_over_1000_usdc: largeCount,
+      largest_trade_usdc:
+        largest > 0 ? Math.round(largest * 100) / 100 : undefined,
+    };
+  } catch (e) {
+    return {
+      trade_count_sampled: 0,
+      notional_total_usdc: 0,
+      large_trade_count_over_1000_usdc: 0,
+      trades_endpoint_error: `data-api fetch threw: ${(e as Error).message}`,
+    };
+  }
 }

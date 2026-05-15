@@ -46,6 +46,57 @@ Run #4 hit a Cloudflare interstitial (HTML response, not JSON) on the Sonnet 4.6
 
 ---
 
+## 2026-05-15 (later) — both bugs above fixed
+
+### Root cause of News + Sentiment failures: `web_search_20260209` defaults to PTC mode
+
+When diagnostic logging surfaced the error, it was crystal clear:
+
+```
+'claude-haiku-4-5-20251001' does not support programmatic tool calling.
+The following tools have `allowed_callers` that require it: web_search.
+Explicitly set `allowed_callers=["direct"]` on these tools, or use a
+model that supports programmatic tool calling.
+```
+
+**Why this bites:** Anthropic's newer `web_search_20260209` tool defaults to **programmatic tool calling (PTC)** mode — the model writes Python code inside the code-execution container, the code calls `web_search()` as a function, and only the *final* return value flows back to the model. PTC requires a model that supports it; Haiku 4.5 doesn't. Sonnet does.
+
+The classic shape — `tool_use` → `tool_result` round-trip — is opt-in on `web_search_20260209` via `allowed_callers: ["direct"]`. The older `web_search_20250305` version doesn't have PTC, so it would have worked out of the box, but I picked the newer version off the live-sources table without spotting the PTC default.
+
+**Fix:** added `allowed_callers: ["direct"]` to both News and Sentiment agents' web_search tool definitions (`src/agents/news.ts`, `src/agents/sentiment.ts`). One-line each. Re-ran — all 4 specialists now succeed.
+
+**Lesson for Phase 4+:** when adding a server-side tool with a date-suffixed version, check the tool's defaults table. PTC is opt-in for older models even when the tool itself is the latest version.
+
+### Market Structure compression: 115,232 → 6,109 input tokens (94.7% reduction)
+
+Refactored the tool to drop raw `price_history_1d` arrays and return only signal-dense summaries:
+
+| Old (115k tokens) | New (6.1k tokens) |
+|---|---|
+| Full 1d price history (often 100+ raw timestamp/price tuples per side) | `trajectory`: `pct_change_{1h,6h,24h}` + one-word label (rising/falling/sideways/volatile) |
+| `OrderbookSummary` with top-5 depth + total | `OrderbookSummary` with top-3 depth (price, size_usdc) tuples + mid |
+| No flow data | `FlowSummary` from `data-api.polymarket.com/trades?market=<condition_id>` — sample size, notional total, large-trade count >$1k, largest trade, 24h volume from Gamma metadata |
+
+Helpers live in `src/polymarket.ts`: `summarizeOrderbook`, `summarizePriceHistory`, `getFlowSummary`. Each tool response now ~1KB.
+
+**Bonus finding:** the compressed signal is *more* useful, not less. Market Structure went from confidence 42 on the bloated input to 72-88 on the compact input — clearer data = more decisive agent.
+
+### Prompt cache hits showing up
+
+Final run telemetry:
+- Historical: input=3, output=2074, cache_read=**2020** — the entire system prompt served from cache
+- Judge: input=4115, output=4465, cache_read=**2950** — Judge prompt cached too
+
+Cache reads cost ~10% of base input, so this is real money saved on repeat analyses. The minimum-prefix sizing (system prompts past 2048 tok for Sonnet, 4096 for Haiku) is paying off as designed.
+
+### Open follow-up: position sizing ignores market price
+
+Side-effect of running the Starmer market (YES at 5.5¢) — Judge recommended `$10` (10% of $100 bankroll) on a NO signal with 68% subjective probability, but Kelly fraction is **0.00%**. Buying NO at 94.5¢ requires subjective probability > 0.945 to be +EV; ours is 0.68. The orchestrator's "confidence 60-70 → 10%" heuristic doesn't consult the market price, so it sizes positions that Kelly says have negative expected value.
+
+**Fix to consider in next iteration:** have the Judge see `current_yes_price` and integrate Kelly into its size logic, or apply a Kelly cap server-side in `enforceSizeBounds`. Not urgent but worth knowing about before any real money goes through the pipeline.
+
+---
+
 ## 2026-05-14 (later) — CCTP mainnet→testnet route resolved: NOT supported, mirror service plan locked
 
 ### Finding

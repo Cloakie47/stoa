@@ -129,8 +129,12 @@ export interface MarketContext {
   current_yes_price?: number;
   /** Resolution date or end date, if known. */
   end_date?: string;
-  /** Total volume in USDC. */
+  /** Total cumulative volume in USDC. */
   volume_usdc?: number;
+  /** Trailing 24h volume in USDC, when Gamma exposes it. */
+  volume_24h_usdc?: number;
+  /** CTF conditionId — needed by the data-api /trades endpoint. */
+  condition_id?: string;
   /** Raw CLOB token IDs for YES/NO — needed for orderbook queries. */
   token_ids?: { yes?: string; no?: string };
 }

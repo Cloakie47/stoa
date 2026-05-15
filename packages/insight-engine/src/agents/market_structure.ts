@@ -24,10 +24,14 @@ import {
   type RunAgentResult,
 } from "../claude.js";
 import {
+  getFlowSummary,
   getOrderbook,
   getPriceHistory,
   summarizeOrderbook,
+  summarizePriceHistory,
+  type FlowSummary,
   type OrderbookSummary,
+  type PriceTrajectory,
 } from "../polymarket.js";
 import type { AgentTrace, MarketContext } from "../types.js";
 
@@ -48,11 +52,12 @@ Your view is COMPLEMENTARY to the others. They reason about the world; you reaso
 
 You have ONE custom tool:
 
-\`fetch_market_structure(side: "yes" | "no")\` — returns:
-  - Orderbook summary: best bid, best ask, spread in cents, depth at top-5 levels (USDC value), total bids/asks
-  - 1-day price history: recent (timestamp, price) points
+\`fetch_market_structure(side: "yes" | "no")\` — returns a compact JSON summary:
+  - **orderbook**: \`best_bid\`, \`best_ask\`, \`mid\`, \`spread_cents\`, \`top_bids\` (top-3 levels as [price, size_usdc]), \`top_asks\` (same), \`bid_depth_top3_usdc\`, \`ask_depth_top3_usdc\`.
+  - **trajectory**: \`current_price\`, \`pct_change_1h\`, \`pct_change_6h\`, \`pct_change_24h\`, \`trajectory\` (one of: rising / falling / sideways / volatile / unknown), \`num_points\` (sample size).
+  - **flow**: \`trade_count_sampled\`, \`notional_total_usdc\`, \`large_trade_count_over_1000_usdc\`, \`largest_trade_usdc\`, \`volume_24h_usdc\`, optional \`trades_endpoint_error\`.
 
-Call it for both "yes" and "no" sides to compare. You can also call multiple times if you want a different time interval (the tool always returns 1d by default).
+The response is compact and signal-dense — no raw price arrays. Call it for both "yes" and "no" sides to compare. 2 calls usually suffice; 3-4 only if you want to verify a specific finding.
 
 # OUTPUT FORMAT
 
@@ -126,29 +131,50 @@ interface StructureToolInput {
   side: "yes" | "no";
 }
 
+/**
+ * Compact tool result — no raw arrays. Designed to keep total round-trip
+ * input under ~1KB so the model sees signal-dense data instead of paging
+ * through hundreds of price points.
+ */
 interface StructureToolResult {
   side: "yes" | "no";
-  token_id: string;
+  /** Truncated token id — full id is ~80 chars and we only need it for trust. */
+  token_id_prefix: string;
   orderbook: OrderbookSummary;
-  price_history_1d: Array<{ timestamp: string; price: number }>;
+  trajectory: PriceTrajectory;
+  flow: FlowSummary;
 }
 
-async function fetchStructure(
-  side: "yes" | "no",
-  tokenId: string,
-): Promise<StructureToolResult> {
-  const [book, history] = await Promise.all([
+async function fetchStructure(args: {
+  side: "yes" | "no";
+  tokenId: string;
+  conditionId?: string;
+  volume24h?: number;
+}): Promise<StructureToolResult> {
+  const { side, tokenId, conditionId, volume24h } = args;
+  const flowPromise = conditionId
+    ? getFlowSummary(conditionId, 50)
+    : Promise.resolve<FlowSummary>({
+        trade_count_sampled: 0,
+        notional_total_usdc: 0,
+        large_trade_count_over_1000_usdc: 0,
+        trades_endpoint_error: "No conditionId on market context",
+      });
+  const [book, history, flow] = await Promise.all([
     getOrderbook(tokenId),
     getPriceHistory(tokenId, "1d"),
+    flowPromise,
   ]);
+  // Merge in 24h volume from Gamma metadata if we have it.
+  if (volume24h !== undefined) {
+    flow.volume_24h_usdc = Math.round(volume24h * 100) / 100;
+  }
   return {
     side,
-    token_id: tokenId,
+    token_id_prefix: tokenId.slice(0, 10) + "…",
     orderbook: summarizeOrderbook(book),
-    price_history_1d: history.map((point) => ({
-      timestamp: new Date(point.t * 1000).toISOString(),
-      price: point.p,
-    })),
+    trajectory: summarizePriceHistory(history),
+    flow,
   };
 }
 
@@ -184,7 +210,12 @@ export async function runMarketStructureAgent(
     fetch_market_structure: async (input: unknown): Promise<string> => {
       const { side } = input as StructureToolInput;
       const tokenId = side === "yes" ? yesTokenId : noTokenId;
-      const result = await fetchStructure(side, tokenId);
+      const result = await fetchStructure({
+        side,
+        tokenId,
+        conditionId: context.condition_id,
+        volume24h: context.volume_24h_usdc,
+      });
       return JSON.stringify(result);
     },
   };

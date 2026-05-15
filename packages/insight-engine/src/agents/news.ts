@@ -132,11 +132,23 @@ Your trace gets pinned on-chain. Be honest, be specific, cite real sources. The 
 
 You have one user message coming. Read it carefully, perform 1-3 web searches, then emit the JSON trace.`;
 
+/**
+ * Anthropic's hosted web_search tool.
+ *
+ * `allowed_callers: ["direct"]` is REQUIRED on Haiku 4.5 — the newer
+ * `web_search_20260209` defaults to programmatic-tool-calling mode (the
+ * model writes code that calls the tool from within a code-execution
+ * container), which Haiku 4.5 doesn't support. Without this flag, the
+ * call 400s with the model-doesn't-support-PTC error. "direct" mode is
+ * the classic shape: the model emits a `tool_use` block, the server
+ * executes the search, and a `tool_result` lands in the next turn.
+ */
 const WEB_SEARCH_TOOL: Anthropic.ToolUnion = {
   type: "web_search_20260209",
   name: "web_search",
   max_uses: 5,
-};
+  allowed_callers: ["direct"],
+} as Anthropic.ToolUnion;
 
 export async function runNewsAgent(
   context: MarketContext,
