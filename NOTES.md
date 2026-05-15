@@ -305,3 +305,90 @@ These two facts together rule out **both** a full-mainnet loop and a full-testne
 - 4-way revenue split: 60% operator / 20% user / 15% Polyseer / 5% Canteen-Agora (per project memory).
 - Stack: TS everywhere except Solidity in `/contracts`. Foundry for tests. Cloudflare Workers + Hono for facilitator. Next.js + Tailwind for dashboard. grammY for Telegram bot.
 - Phase 1 next: scaffold the monorepo and write Splitter.sol + TracePin.sol with Foundry tests on Arc Testnet. The architecture above doesn't change that — Splitter/TracePin are the same regardless of whether USDC arrives via CCTP or via the mirror service.
+
+---
+
+## Polymarket builder fees, V2 order schema, and `feeRateBps` (2026-05-15)
+
+Surfaced from the Phase-4 smoke-test review: the prepared order showed `fee_rate_bps: 0` and we needed to know whether builder revenue still flows under that condition. Tracing it through both Polymarket docs and the SDK source resolved a few things at once.
+
+### Authoritative answer: builder fees DO flow with `feeRateBps=0` — because V2 dropped the field entirely
+
+Per [Polymarket Builder Fees](https://docs.polymarket.com/builders/fees):
+
+- **Builder fees are configured off-chain in your builder profile**, not on the order. Two knobs: `builder_taker_fee_bps` (max 100 bps = 1%) and `builder_maker_fee_bps` (max 50 bps = 0.5%). Set at polymarket.com/settings?tab=builder.
+- **Fees flow automatically when `builderCode` is on the order** — "When a builder attaches their unique builder code to an order and that order matches, a builder fee is collected alongside any platform fee."
+- **Builder fees stack additively on top of platform fees** — they don't replace them.
+- **Platform fees themselves are set at match time** in V2, not on the order ([Polymarket Changelog](https://docs.polymarket.com/changelog)). The order's old `feeRateBps` field was removed in the April 2026 V2 upgrade.
+
+So: there's no per-order fee rate to configure for builder revenue, and the smoke-test output showing `fee_rate_bps: 0` was a phantom from a V1-shaped reconstruction in our wrapper — not a real V2 field. **Builder revenue is gated on (a) having registered as a builder, (b) setting non-zero rates on the builder profile, and (c) including `builderCode` on each order.** The on-chain order struct itself doesn't carry a rate.
+
+### Operational follow-up for ourselves
+
+The smoke test will show `builder: 0xff2fdfbfe1…` matching `POLY_BUILDER_CODE`. That's the necessary condition. For the **sufficient** condition (actually earning fees), the operator (or the autonomous bot in Phase 5) must have:
+
+1. Registered the builder profile at polymarket.com/settings?tab=builder against the **funder address** that posts the orders.
+2. Set `builder_taker_fee_bps` and/or `builder_maker_fee_bps` > 0 on that profile.
+
+Without step 2, `getBuilderTrades()` will return rows with `fee: "0"`. Worth verifying via a single submitted order before scaling.
+
+### V2 EIP-712 Order schema — authoritative from the SDK
+
+Both the docs and `clob-client-v2@1.0.6` source (`dist/order-utils/model/ctfExchangeV2TypedData.js`, `dist/order-utils/exchangeOrderBuilderV2.js`) agree on this exact V2 Order type:
+
+```
+Order(
+  uint256 salt,
+  address maker,
+  address signer,
+  uint256 tokenId,
+  uint256 makerAmount,
+  uint256 takerAmount,
+  uint8   side,           // 0 = BUY, 1 = SELL
+  uint8   signatureType,
+  uint256 timestamp,      // ms; replaces V1's nonce for per-address uniqueness
+  bytes32 metadata,
+  bytes32 builder
+)
+```
+
+- **Removed from V1:** `taker`, `nonce`, `feeRateBps`. (Docs also list `expiration` as removed; the SDK source keeps `expiration` on the SignedOrder wire format but does NOT include it in the EIP-712 hash. So orders with `expiration > 0` are still GTD-style, but the field doesn't affect the signed hash.)
+- **Added in V2:** `timestamp` (ms), `metadata`, `builder`.
+- **Domain version bumped from `"1"` to `"2"`.** Domain name stays `"Polymarket CTF Exchange"`. `verifyingContract` is `exchangeV2` for standard markets (`0xE111180000d2663C0091e4f400237545B87B996B`) and `negRiskExchangeV2` for neg-risk (`0xe2222d279d744050d28e00520010520000310F59`).
+
+### Fix landed in `packages/polymarket-client/src/index.ts`
+
+The wrapper's `prepareOrder` was reconstructing EIP-712 typed data with the V1 schema. Operators inspecting `prepared.typedData` would have seen V1 field names (`feeRateBps: "0"`, `nonce: "0"`, `taker: 0x…`) for an order the SDK actually signed against the V2 schema — the signature would not verify against the reconstruction. Now corrected:
+
+- `ORDER_EIP712_TYPES` mirrors `CTF_EXCHANGE_V2_ORDER_STRUCT` from the SDK.
+- Domain version is `"2"`.
+- Typed-data message includes `timestamp`, `metadata`, `builder` and drops the V1-only fields.
+- Summary surfaces `timestamp`, `metadata`, `builder` (the actual on-order field) plus our configured `builder_code` and the wire-only `expiration`. No more phantom `fee_rate_bps`.
+
+10 mocked unit tests still pass; live e2e is gated and untouched.
+
+---
+
+## Polymarket Builder Profile: 7-Day Fee Update Cooldown (2026-05-15)
+
+Polymarket enforces a **7-day cooldown between `builder_taker_fee_bps` / `builder_maker_fee_bps` updates** on the builder profile. Discovered the hard way trying to update fees on **2026-05-15**; next allowed update is **2026-05-22 13:02 UTC**.
+
+### Implications
+
+- **Initial profile setup should set realistic non-zero values immediately, not zero defaults.** A new builder who registers with `0/0` (because they're "just setting it up first") locks themselves out of fee revenue for the next 7 days. Pick your taker/maker rates in advance and set them on the very first save.
+- **For demos inside the cooldown window, on-chain builder code attribution still works.** Trades attributed to our `builder` field continue to show up in `getBuilderTrades()` — the cooldown only gates the *rate change*, not the attribution mechanism. So the Stoa demo can still prove the attribution flow end-to-end on Polymarket mainnet even while fees are stuck at zero; revenue numbers from the cooldown window will read $0, but the trade-attribution evidence is intact.
+- **Recommended Polymarket UX improvement:** warn users at profile creation that **"0 means you earn nothing for the next 7 days"** — a single inline note next to the fee inputs at first save would prevent this. The cooldown itself is reasonable anti-abuse behavior, but defaulting to zero with no warning makes the default the trap.
+
+### Feedback-incentive angle (Circle developer tooling, $500)
+
+By extension, any developer onboarding Polymarket as a payment leg via Circle's stack hits this same trap. Circle's Polymarket integration docs (and any "your prediction-market-payments quickstart" surface Circle ships) should surface the 7-day cooldown explicitly — ideally with a "set non-zero rates on first save" callout in the builder-profile section of the quickstart. Worth raising in the hackathon feedback channel since:
+
+1. The trap is invisible until the developer ships and notices zero revenue 24h later, by which point they've already lost ~6 days of attribution they could have been earning on.
+2. The fix is a one-line doc addition, not a protocol change.
+3. It compounds Circle's value prop ("we make Polymarket-on-Circle frictionless") if the docs catch this and Polymarket's own UI doesn't.
+
+### Recovery plan for Stoa
+
+- **2026-05-15 → 2026-05-22:** continue smoke testing and Phase 5 wallet wiring; trades on Polymarket mainnet in this window earn $0 fees but still produce attribution rows in `getBuilderTrades()` that we can show judges as proof-of-flow.
+- **2026-05-22 13:02 UTC:** as soon as the cooldown clears, set `builder_taker_fee_bps = X` and `builder_maker_fee_bps = Y` (TBD — pick conservative values well under the 100/50 bps caps to avoid being noticeably more expensive than competing front-ends). Lock in the rates before the demo recording.
+- After this initial update, treat the 7-day cooldown as load-bearing: don't tweak rates again unless we genuinely have to.

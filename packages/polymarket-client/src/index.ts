@@ -157,8 +157,10 @@ export interface PreparedOrder {
     side: "BUY" | "SELL";
     price: number;
     size: number;
-    fee_rate_bps?: number;
+    timestamp: string;
     expiration: string;
+    metadata: string;
+    builder: string;
     builder_code: string;
     signature_type: SignatureTypeV2;
     signature_placeholder: string;
@@ -168,22 +170,28 @@ export interface PreparedOrder {
 
 // ── Implementation ───────────────────────────────────────────────────────────
 
+// CLOB V2 EIP-712 Order struct — mirrors CTF_EXCHANGE_V2_ORDER_STRUCT in the
+// SDK (clob-client-v2/dist/order-utils/model/ctfExchangeV2TypedData.js). V1's
+// taker/nonce/feeRateBps/expiration were removed; timestamp/metadata/builder
+// were added. `expiration` survives on the SignedOrder wire format but is
+// NOT part of the EIP-712 hash.
 const ORDER_EIP712_TYPES = {
   Order: [
     { name: "salt", type: "uint256" },
     { name: "maker", type: "address" },
     { name: "signer", type: "address" },
-    { name: "taker", type: "address" },
     { name: "tokenId", type: "uint256" },
     { name: "makerAmount", type: "uint256" },
     { name: "takerAmount", type: "uint256" },
-    { name: "expiration", type: "uint256" },
-    { name: "nonce", type: "uint256" },
-    { name: "feeRateBps", type: "uint256" },
     { name: "side", type: "uint8" },
     { name: "signatureType", type: "uint8" },
+    { name: "timestamp", type: "uint256" },
+    { name: "metadata", type: "bytes32" },
+    { name: "builder", type: "bytes32" },
   ],
 };
+const ZERO_BYTES32 =
+  "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 export class StoaPolymarketClient {
   readonly host: string;
@@ -360,28 +368,50 @@ export class StoaPolymarketClient {
     const fullSignature =
       typeof sigField === "string" ? sigField : String(sigField);
 
+    const so = signedOrder as unknown as {
+      salt: string;
+      maker: string;
+      signer: string;
+      tokenId: string;
+      makerAmount: string;
+      takerAmount: string;
+      side: number | string;
+      signatureType: number;
+      timestamp: string;
+      metadata?: string;
+      builder?: string;
+      expiration?: string;
+    };
+    // Normalize side to the 0/1 form the SDK uses inside the EIP-712 message
+    // (BUY=0, SELL=1) — matches buildOrderTypedData in exchangeOrderBuilderV2.
+    const sideNumeric =
+      typeof so.side === "number"
+        ? so.side
+        : /^buy$/i.test(String(so.side))
+          ? 0
+          : 1;
+
     const typedData = {
       domain: {
         name: "Polymarket CTF Exchange",
-        version: "1",
+        version: "2",
         chainId: this.chainId,
         verifyingContract,
       },
       types: ORDER_EIP712_TYPES,
       primaryType: "Order" as const,
       message: {
-        salt: (signedOrder as unknown as { salt: string }).salt,
-        maker: (signedOrder as unknown as { maker: string }).maker,
-        signer: (signedOrder as unknown as { signer: string }).signer,
-        taker: (signedOrder as unknown as { taker: string }).taker,
-        tokenId: (signedOrder as unknown as { tokenId: string }).tokenId,
-        makerAmount: (signedOrder as unknown as { makerAmount: string }).makerAmount,
-        takerAmount: (signedOrder as unknown as { takerAmount: string }).takerAmount,
-        expiration: (signedOrder as unknown as { expiration: string }).expiration,
-        nonce: (signedOrder as unknown as { nonce?: string }).nonce ?? "0",
-        feeRateBps: (signedOrder as unknown as { feeRateBps?: string }).feeRateBps ?? "0",
-        side: (signedOrder as unknown as { side: number | string }).side,
-        signatureType: (signedOrder as unknown as { signatureType: number }).signatureType,
+        salt: so.salt,
+        maker: so.maker,
+        signer: so.signer,
+        tokenId: so.tokenId,
+        makerAmount: so.makerAmount,
+        takerAmount: so.takerAmount,
+        side: sideNumeric,
+        signatureType: so.signatureType,
+        timestamp: so.timestamp,
+        metadata: so.metadata ?? ZERO_BYTES32,
+        builder: so.builder ?? ZERO_BYTES32,
       },
     };
 
@@ -390,12 +420,12 @@ export class StoaPolymarketClient {
       side: args.side,
       price: args.price,
       size: args.size,
-      fee_rate_bps:
-        typeof typedData.message.feeRateBps === "string"
-          ? Number.parseInt(typedData.message.feeRateBps, 10)
-          : undefined,
-      expiration: String(typedData.message.expiration),
-      builder_code: this.builderCode ?? "0x0000000000000000000000000000000000000000000000000000000000000000",
+      timestamp: String(typedData.message.timestamp),
+      // Wire-only — not part of the EIP-712 hash, but the SDK still posts it.
+      expiration: String(so.expiration ?? "0"),
+      metadata: String(typedData.message.metadata),
+      builder: String(typedData.message.builder),
+      builder_code: this.builderCode ?? ZERO_BYTES32,
       signature_type: this.signatureType,
       // Show first 10 + last 6 chars so the operator sees it's signed without
       // having to scan the full 132-char hex blob.
