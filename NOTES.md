@@ -4,6 +4,48 @@ Living document for architecture decisions and the reasons behind them. Newest e
 
 ---
 
+## 2026-05-15 — insight-engine end-to-end working, first FullTrace pinned to Arc
+
+**Status:** Phase 3 (multi-agent Polymarket analysis) done. `packages/insight-engine/` ships `analyzeMarket(url, balance)` — 4 specialist Claude agents (News, Sentiment, Historical, Market Structure) fanned out in parallel, Sonnet 4.6 Judge aggregator, FullTrace hashed + pinned to IPFS via Pinata + anchored on-chain via `TracePin.pinTrace()`.
+
+### First successful run (proof of life)
+
+- Input URL: `polymarket.com/event/what-will-trump-say-during-bilateral-events-with-xi-jinping` (event with 33 sub-markets)
+- Auto-selected highest-volume sub-market: `"Will Trump say 'Iran' during events with Xi Jinping?"` ($484k volume)
+- Total real LLM spend: $0.3334 (one analysis, end-to-end)
+- Arc tx: `0xf754404bf78221785708ae802083d9d43e2a74a30f91bf4dfbd976e99a8a590d` @ block 42285533
+- IPFS CID: `QmUvQtmL8E8DqM2kwsRZg7udnHCnAc3fzLNf9ZFzHfmFfH` (Pinata)
+- Trace hash: `0x04f6f5ea402ae96e502eb2ebd356f221050b4e44e8fec8658bab63c15e4062e4`
+
+### Three bugs hit on the way to a clean run
+
+All three were Anthropic `output_config.format` structured-outputs constraint violations that the per-SDK doc warns about but I missed:
+
+1. **Integer `minimum`/`maximum` rejected.** `confidence: {type: "integer", minimum: 0, maximum: 100}` → 400. Removed numeric bounds from the schema; relying on the model + client-side clamping for size enforcement.
+2. **Number `minimum` on `recommended_size_usdc` rejected** — same root cause. Removed.
+3. **`additionalProperties: { type: "object", ... }` rejected** — must be `false`. Rewrote `agent_signals` from a record-with-additional-properties schema to a fixed 4-key shape (`news`/`sentiment`/`historical`/`market_structure`). More precise anyway.
+
+**Lesson:** structured-outputs schemas accept only the JSON-Schema subset listed in the API docs. Type+enum+required+`additionalProperties:false`. No `minimum`/`maximum`/`minLength`/`pattern`/`additionalProperties:<object>`. Validate client-side.
+
+### Cloudflare 403 challenge on judge call
+
+Run #4 hit a Cloudflare interstitial (HTML response, not JSON) on the Sonnet 4.6 Judge call after all 4 specialists succeeded. Looked like a WARP↔Cloudflare interaction — first 4 calls fine, the 5th tripped a heuristic. Added a `createWithRetry` wrapper in `src/claude.ts` that handles 403/408/429/5xx with 2s/4s exponential backoff (the SDK's auto-retry doesn't cover 403). 400/401/404 are never retried — those are caller bugs.
+
+### Architecture decisions worth remembering
+
+- **Model split:** Haiku 4.5 for News, Sentiment, Market Structure (task-bound work). Sonnet 4.6 + adaptive thinking for Historical (deep reasoning) and Judge (highest-leverage call). Substituted `claude-sonnet-4-6` for "Sonnet 4.7" since the latter doesn't exist (latest Sonnet is 4.6).
+- **Prompt caching wired throughout.** System prompts sized past each model's minimum cacheable prefix (4096 tok Haiku, 2048 Sonnet). Verified — Historical's first run showed 2020 cache_read tokens on a re-warm.
+- **Budget cap enforced mid-pipeline.** If 4 specialists spend >50% of budget cap, the orchestrator aborts before committing to the expensive Sonnet Judge call.
+- **Pin pipeline degrades gracefully.** Missing IPFS backend → empty CID on-chain (hash still anchored). Pinata preferred over Storacha because Storacha needs a one-time CLI ritual to mint a UCAN delegation proof; Pinata is just a JWT.
+- **Event-URL handling.** `fetchMarketContext()` tries `/markets?slug=` first, falls back to `/events?slug=` and picks the highest-volume sub-market when the URL is an event. Logs the selection.
+
+### Known issues from the first run (queued for next iteration)
+
+- **News + Sentiment agents silently failed** on the Trump/Xi run; orchestrator dropped the errors because the `agentTraces.length < 2` failure gate didn't trip. Patched `src/index.ts` to always `console.warn` failed specialists. Root cause TBD — needs a re-run with diagnostic logging on a non-resolved market.
+- **Market Structure burned 115k input tokens** on the orderbook tool round-trip. The tool currently dumps raw `price_history_1d` arrays which are large. Need to compress to compact stats only.
+
+---
+
 ## 2026-05-14 (later) — CCTP mainnet→testnet route resolved: NOT supported, mirror service plan locked
 
 ### Finding
