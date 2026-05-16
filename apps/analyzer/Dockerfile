@@ -34,11 +34,11 @@ COPY apps/analyzer        apps/analyzer
 
 # Install all workspace deps (no frozen lockfile — Railway builds without
 # the root lockfile and the file: refs are resolved fresh).
-WORKDIR /app/packages/bot-core
+WORKDIR /app/packages/insight-engine
 RUN pnpm install --prod=false --ignore-scripts \
   && pnpm run build
 
-WORKDIR /app/packages/insight-engine
+WORKDIR /app/packages/bot-core
 RUN pnpm install --prod=false --ignore-scripts \
   && pnpm run build
 
