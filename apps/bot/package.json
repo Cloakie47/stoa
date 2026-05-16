@@ -1,0 +1,33 @@
+{
+  "name": "@stoa/bot",
+  "version": "0.0.1",
+  "description": "Stoa InsightAgent Telegram bot on Cloudflare Workers. Multi-agent prediction-market analysis + Stoa-routed payments on Arc + Limitless order placement on Base.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "db:init": "wrangler d1 execute stoa-bot-db --local --file=./migrations/0001_init.sql",
+    "db:init:remote": "wrangler d1 execute stoa-bot-db --remote --file=./migrations/0001_init.sql",
+    "simulate": "tsx scripts/simulate.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.88.0",
+    "@stoa/bot-core": "file:../../packages/bot-core",
+    "@stoa/insight-engine": "file:../../packages/insight-engine",
+    "@stoa/limitless-client": "file:../../packages/limitless-client",
+    "grammy": "^1.30.0",
+    "viem": "^2.39.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240909.0",
+    "@types/node": "^22.0.0",
+    "dotenv": "^16.4.5",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^3.86.0"
+  },
+  "packageManager": "pnpm@9.15.4"
+}

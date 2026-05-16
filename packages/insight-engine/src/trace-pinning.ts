@@ -3,9 +3,7 @@
  *
  *   1. Canonicalize the FullTrace JSON (sorted keys, blanked-out hash/cid/tx
  *      fields so the hash is over content alone) and keccak256 it.
- *   2. Upload the JSON to IPFS via Pinata (preferred — just needs a JWT) OR
- *      Storacha/web3.storage (needs KEY + PROOF). Gracefully skips if neither
- *      is configured.
+ *   2. Upload the JSON to IPFS via Pinata (skipped if no PINATA_JWT).
  *   3. Call TracePin.pinTrace(traceHash, ipfsCid) on Arc Testnet via viem.
  *
  * The on-chain hash is the load-bearing artifact for an audit trail — even
@@ -16,8 +14,7 @@
  *   - DEPLOYER_PRIVATE_KEY (required) — the operator wallet that signs TracePin tx
  *   - ARC_TESTNET_RPC (required)
  *   - TRACEPIN_ADDRESS (required)
- *   - PINATA_JWT (optional, preferred for IPFS)
- *   - STORACHA_KEY + STORACHA_PROOF (optional, fallback for IPFS)
+ *   - PINATA_JWT (optional — IPFS upload is skipped without it)
  */
 
 import {
@@ -88,19 +85,14 @@ export function hashTrace(trace: FullTrace): Hex {
 }
 
 /**
- * Upload the trace JSON to IPFS. Returns the CID, or null if no IPFS
- * backend is configured (the orchestrator will note this in the FullTrace).
+ * Upload the trace JSON to IPFS via Pinata. Returns the CID, or null if
+ * PINATA_JWT is not set (the orchestrator records this in the FullTrace and
+ * proceeds with cid="" on-chain).
  */
 export async function uploadToIpfs(trace: FullTrace): Promise<string | null> {
+  if (!process.env.PINATA_JWT) return null;
   const json = stableStringify(trace);
-
-  if (process.env.PINATA_JWT) {
-    return uploadToPinata(json, trace);
-  }
-  if (process.env.STORACHA_KEY && process.env.STORACHA_PROOF) {
-    return uploadToStoracha(json);
-  }
-  return null;
+  return uploadToPinata(json, trace);
 }
 
 async function uploadToPinata(json: string, trace: FullTrace): Promise<string> {
@@ -133,60 +125,6 @@ async function uploadToPinata(json: string, trace: FullTrace): Promise<string> {
   }
   const body = (await res.json()) as { IpfsHash: string };
   return body.IpfsHash;
-}
-
-/**
- * Storacha (web3.storage) upload path. Requires the heavy CLI setup
- * (storacha CLI → space → delegation → KEY + PROOF env vars). Loads
- * @storacha/client dynamically so the dep isn't required when Pinata is used.
- *
- * If you hit "Cannot find module '@storacha/client'", install it:
- *   pnpm add @storacha/client
- */
-async function uploadToStoracha(json: string): Promise<string> {
-  // Dynamic import — the package isn't a declared dep; we only require it
-  // at runtime when this code path is actually taken.
-  type StorachaClientModule = {
-    create(opts: {
-      principal: unknown;
-      store: unknown;
-    }): Promise<{
-      addSpace: (proof: unknown) => Promise<{ did: () => string }>;
-      setCurrentSpace: (did: string) => Promise<void>;
-      uploadFile: (file: File) => Promise<{ toString: () => string }>;
-    }>;
-  };
-  type StorachaSignerModule = { parse(s: string): unknown };
-  type StorachaProofModule = { parse(s: string): Promise<unknown> };
-  type StorachaStoreModule = { StoreMemory: new () => unknown };
-
-  const [Client, Signer, Proof, Store] = (await Promise.all([
-    import("@storacha/client" as string).catch(() => {
-      throw new Error(
-        "@storacha/client is not installed. Run `pnpm add @storacha/client` in packages/insight-engine, or use PINATA_JWT instead.",
-      );
-    }),
-    import("@storacha/client/principal/ed25519" as string),
-    import("@storacha/client/proof" as string),
-    import("@storacha/client/stores/memory" as string),
-  ])) as unknown as [
-    StorachaClientModule,
-    StorachaSignerModule,
-    StorachaProofModule,
-    StorachaStoreModule,
-  ];
-
-  const principal = Signer.parse(process.env.STORACHA_KEY!);
-  const store = new Store.StoreMemory();
-  const client = await Client.create({ principal, store });
-  const proof = await Proof.parse(process.env.STORACHA_PROOF!);
-  const space = await client.addSpace(proof);
-  await client.setCurrentSpace(space.did());
-  const file = new File([json], "stoa-insight-trace.json", {
-    type: "application/json",
-  });
-  const cid = await client.uploadFile(file);
-  return cid.toString();
 }
 
 export interface PinTraceParams {

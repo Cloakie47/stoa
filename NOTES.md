@@ -1,6 +1,133 @@
 # NOTES.md — running architecture log
 
-Living document for architecture decisions and the reasons behind them. Newest entry at the top. Pair with `RESEARCH_POLYMARKET.md` and `RESEARCH_CIRCLE_POLYMARKET.md` for source citations.
+Living document for architecture decisions and the reasons behind them. Newest entry at the top. Pair with `RESEARCH_POLYMARKET.md`, `RESEARCH_CIRCLE_POLYMARKET.md`, and `RESEARCH_LIMITLESS.md` for source citations.
+
+---
+
+## 2026-05-16 — EURC multi-currency probe + Arc Blueprint alignment
+
+**EURC is deployed on Arc Testnet** at `0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a` (canonical address per https://docs.arc.io/arc/references/contract-addresses). Probed via `apps/bot/scripts/probe-eurc.ts`:
+
+- `name = "EURC"`, `symbol = "EURC"`, `version = "2"`, `decimals = 6`
+- `DOMAIN_SEPARATOR = 0x649ec6b0…ebf160` — present, confirms EIP-712 / EIP-3009 readiness (same FiatTokenV2 family as Arc USDC at `0x36…0000`)
+- Deployer balance: **0 EURC**. End-to-end split UNVERIFIED — need to hit https://faucet.circle.com (Arc Testnet + EURC) before re-running the probe
+
+**Architectural truth on multi-currency**:
+- `Splitter.sol` is **token-agnostic** — first arg of `distribute()` is `address token`. Any ERC-20 works. (Verified by reading the source: `contracts/src/Splitter.sol:42`.)
+- `StoaSettler.sol` **binds USDC immutably** in the constructor (`IERC20 public immutable usdc;`). An EURC-denominated fee path would need a **second StoaSettler instance** deployed with EURC as `_usdc`.
+- The probe runs `Splitter.distribute()` directly with EURC (skipping StoaSettler) — when the deployer has EURC, it will verify the 70/20/10 split fires correctly on a non-USDC token.
+
+**Status:** EURC support compiled-in and architecturally sound, but unverified on-chain at hackathon time (no testnet EURC in the deployer wallet). Operator action: request EURC from Circle faucet → re-run `pnpm tsx scripts/probe-eurc.ts` → expect a successful `Splitter.distribute` tx hash. If the demo needs an EURC fee flow, deploy a second StoaSettler:
+
+```sh
+forge create contracts/src/StoaSettler.sol:StoaSettler \
+  --constructor-args 0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a $SPLITTER $TRACEPIN \
+  --rpc-url $ARC_RPC --private-key $DEPLOYER_PRIVATE_KEY
+```
+
+Then set a per-currency `STOA_SETTLER_EURC` env var alongside the existing `STOA_SETTLER` (USDC).
+
+---
+
+## 2026-05-16 — Phase 5 trading venue: Limitless on Base + Stoa-routed payment flows (strategic reframe)
+
+**Decision locked.** Phase 5 trades happen on **Limitless Exchange** on Base. Revenue capture moves from "platform-side builder fees" to "**Stoa-routed execution fees**" — every user interaction in the bot pays a Stoa-split micropayment on Arc before the trade is placed. Full plan and reasoning in `RESEARCH_LIMITLESS.md` top banner.
+
+### Two payment flows in the bot
+
+1. **`/analyze`** — $0.10 USDC. Split via `StoaSettler` on Arc testnet: $0.07 operator / $0.02 insight-engine maintainers / $0.01 Canteen ecosystem pool. Runs `insight-engine.analyzeMarket()` and pins FullTrace to Arc + IPFS after the split clears.
+2. **`/confirm`** — $0.20 USDC. Same split scheme, same recipients (70/20/10). Same `StoaSettler` contract. **Executes BEFORE** the Limitless `delegatedOrders.createOrder` call. If split fails → trade does not happen. If trade fails post-split → fee is **non-refundable in v0** (document as known limitation in bot onboarding text; revert flow is post-hackathon polish).
+
+### Why the reframe is stronger than chasing venue revenue
+
+- Polymarket builder fees would be inaccessible until 2026-05-22 (7-day rate-update cooldown started 2026-05-15 13:02 UTC). Hackathon ends 2026-05-25. That's a 3-day window where rates would be live, against a 9-day total build window. Net revenue ≈ negligible regardless.
+- Limitless has **no on-chain builder fees at all** — confirmed in research. Their referral program rewards in LMT tokens / points (pre-token, illiquid), not USDC, and only attributes user-to-user invites via web URL — not programmatic partner submissions.
+- Stoa-routed fees are **venue-agnostic**: every trade through the bot produces a verifiable on-chain Arc tx via contracts **we control**. The Splitter and TracePin both fire on real Arc USDC. This is a far stronger demo than "we *would* earn fees if the platform's program were live and configured."
+- We dogfood Stoa for real, in the demo path, on every user interaction. Judges can verify the tx hashes on Arc explorer.
+
+### Wallets: DIY viem EOAs, not Circle dev-controlled wallets
+
+- **Circle mainnet wallet provisioning requires KYB** we cannot complete in 9 days. Sandbox-only doesn't help — Base mainnet trades need mainnet-tier credentials.
+- Wallet creation per user is just `viem`'s `generatePrivateKey()` + `privateKeyToAccount()`. Keys are stored encrypted at rest in D1, decrypted on demand for signing.
+- **The Circle product story survives.** We still use: Arc (chain), Circle Bridge / CCTP (USDC movement), Circle Paymaster (USDC gas), Circle USYC (operator-share yield), Circle's Compliance Engine (sanctions screening on withdrawals — needs confirmation), Circle Gateway (cross-chain wallet — not yet evaluated). That's still 5-7 Circle products surface. Dropping Embedded Wallets does not break the 20% Circle-stack score.
+- "Web2 UX" is preserved via Telegram's existing account system, not via Circle's Privy-like wallet primitive. Users authenticate to the bot via Telegram identity; the bot generates and custodies their viem EOA. Same end-user experience.
+
+### Limitless partner-access fallback
+
+If Limitless's partner-application approval lags past the hackathon window, the bot falls back to placing **all users' trades from a single operator partner account** (the operator's own approved sub-account). Acceptable trade-off because:
+- Revenue isn't venue-side, so attribution at the trading layer doesn't matter
+- The Stoa-split flow still fires per user per trade — that's the demo
+- The on-chain trace per user is still produced (different mechanism: bot tags trades with the user's Telegram ID off-chain in D1, and the Arc tx + IPFS CID per `/confirm` is the verifiable user-tied artifact)
+
+This is the rejected "shared-operator-EOA" pattern from yesterday's Phase 5 modifications, BUT the rejection reasoning no longer applies because:
+1. **Market manipulation concern:** still real, but the operator account is the *trading*-side entity, not the *custody*-side. Funds live in per-user wallets; the operator just submits. Different posture.
+2. **Custody story:** preserved — user funds are in per-user viem-EOA addresses, never pooled.
+
+We use this fallback only if forced. Primary path is per-user Limitless sub-accounts.
+
+### Code plan (2-day time-box)
+
+- **Day 1 AM:** `packages/limitless-client/` — minimal SDK wrapper. Mirror the polymarket-client surface where shape applies (getMarket, prepareOrder, submitOrder, cancelOrder), but use Limitless's delegated-signing model so the wrapper exposes per-user `subAccountId` parameters instead of per-user signers.
+- **Day 1 PM:** `apps/bot/` scaffold — Cloudflare Workers + grammY + D1 schema (users, wallets, orders, trace pins). Wire viem EOA generation per user. Implement `/start` → wallet creation flow.
+- **Day 2 AM:** Wire `StoaSettler` integration — both `/analyze` and `/confirm` payment flows. Test on Arc testnet.
+- **Day 2 PM:** End-to-end demo trade: `/analyze` → split fires → trace pinned → `/preview` → `/confirm` → split fires → Limitless order placed. At least one full happy path executed on mainnet (Base for trade, Arc for split).
+- **Days 3-4:** Real users for testing + bug fixes.
+- **Day 5:** Submission.
+
+### What stays from yesterday's Phase-5 modifications
+
+- ✅ **/analyze + /preview + /confirm three-command structure** — unchanged.
+- ✅ **Stoa-split dogfooding for /analyze** — unchanged ($0.10 split).
+- ✅ **Inline /confirm UX** showing order details, max-loss, CID + Arc tx hash link — unchanged.
+- ❌ **/confirm cooldown disclosure (Polymarket builder-fee rate)** — *removed* (no platform fee to disclose).
+- ✅ **Strong onboarding disclosure language** — unchanged; now includes "fees are non-refundable on trade failure in v0" + "bot custodies your trading key, exportable on demand."
+- ❌ **Operator-only Polymarket spike** — *complete and definitively concluded* (see entry below). Won't be revisited unless Polymarket support replies with a new path.
+
+The Polymarket V2 finding stays documented for the **$500 Feedback Incentive** submission. Operator is sending the email tonight; if Polymarket responds with the missing pattern, we may circle back post-hackathon. Not in scope for the 2-day code window.
+
+---
+
+## 2026-05-16 — Path B-1 spike: CLOB /auth/api-key does NOT support ERC-1271 (definitive)
+
+End-to-end test of the depositWallet-bound API key flow. Result: **CLOB's L1 auth endpoint accepts only EOA ECDSA signatures**. ERC-7739-wrapped ERC-1271 signatures are rejected at the headers layer (HTTP 401 "Invalid L1 Request headers") before the server reaches the on-chain validation step. This rules out the documented V2 SDK pattern (`signatureType: POLY_1271` + `funderAddress: depositWallet`) for end-to-end agentic order submission via CLOB.
+
+### What B-1 proved
+
+1. **WALLET-CREATE works** with HMAC builder-API-key auth on `https://relayer-v2.polymarket.com/submit`. Endpoint exists, payload is `{type: "WALLET-CREATE", from: ownerEOA, to: factoryAddr}`, no inner sig required. Operator paid ~$0 (Polymarket relayer covers gas).
+2. **Deposit wallet address extraction:** the wallet PROXY emits `OwnershipTransferred(0x0, ownerEOA)` during construction; its address is the emitter of that log. **Do NOT** use the factory's own event `data` field — that's a different shared contract.
+3. **Real deposit wallet** for deployer EOA `0x5342…12435` is `0xF4be72ae8Dd864f6Cb0E48b15fA54E56f3D4E529` (proxy at this address, `owner()` returns the EOA, `eip712Domain()` returns `DepositWallet/1/<self>`).
+4. **ERC-7739 wrap is correct on-chain.** Mirrored the SDK's order-side wrap for the L1 `ClobAuth` attestation, signed with the EOA. Calling `IERC1271.isValidSignature(hash, wrappedSig)` on the deposit wallet returns **0x1626ba7e (magic value)** for the "sign over app's domain" variant. Wrap structure: 202 bytes = `innerSig(65) | appDomainSep(32) | contentsHash(32) | typeString(71) | uint16(len)`. App domain = `ClobAuthDomain v1` (3-field EIP712Domain, no verifyingContract). Test script: `packages/polymarket-client/scripts/verify-1271.ts`.
+5. **CLOB server-side rejection.** POST `/auth/api-key` and GET `/auth/derive-api-key` both return `401 {"error":"Invalid L1 Request headers"}` when given:
+   - `POLY_ADDRESS` = depositWallet (lowercased)
+   - `POLY_SIGNATURE` = our verified-correct 202-byte ERC-7739 wrap
+   - `POLY_TIMESTAMP`, `POLY_NONCE=0`
+   Because our wrap passes on-chain `isValidSignature`, the only remaining explanation is that CLOB's L1 verification path does not invoke ERC-1271 — it ECDSA-recovers the signature and direct-compares to `POLY_ADDRESS`. With a 202-byte non-ECDSA sig, the parser fails before the server reaches an on-chain check.
+
+### Implications for Phase 5
+
+- The documented V2 SDK pattern (`signatureType: POLY_1271` + EOA-bound API key + `funderAddress: depositWallet`) does NOT actually work end-to-end. The order build succeeds and the on-chain settlement layer (the deposit wallet contract) would accept it, but the CLOB's order-submission API gate doesn't. Earlier observation: posting a POLY_1271 order with the EOA-bound API key returned `"the order signer address has to be the address of the API KEY"` — same root cause (CLOB binds API key strictly to its `POLY_ADDRESS` value, which can only be set to an ECDSA-recoverable address).
+- The **only** way to submit deposit-wallet-funded orders through the live CLOB today is via an API key registered with `POLY_ADDRESS = depositWallet`, which requires CLOB to support ERC-1271 — it doesn't.
+- For Phase 5 this means **deposit-wallet trading is blocked at the CLOB API layer**. Options going forward (open for operator decision):
+  1. Email `builder@polymarket.com`: ask whether (a) there is an undocumented endpoint to register a deposit-wallet-bound API key, (b) ERC-1271 support is planned for `/auth/api-key`, or (c) we should use a different pattern.
+  2. Switch the bot architecture from per-user deposit wallets to per-user EOA wallets (Circle developer-controlled EOAs that sign directly). Per-user EOA holds pUSD, signs orders directly with `signatureType: EOA`, no proxy involved. **Loses:** the deposit-wallet bridging UX (operator-paid gas, batch approvals, the Polymarket-native deposit experience). **Keeps:** per-user custody, builder-code attribution, the full Stoa split + trace flow.
+  3. Per-user proxy wallets + operator-facing intermediation: the operator (Stoa) holds an EOA-bound API key on CLOB, and orders go through THAT API key but with `funder` set to the user's deposit wallet. Still requires CLOB to honor "API key submits orders for funders other than itself" — which it explicitly doesn't (`order.signer == POLY_ADDRESS` check).
+- **Recommended next step (when this is picked up):** option 2 (per-user Circle EOAs). It maps cleanly onto Circle's developer-controlled-EOA primitive (which is what we'd ship anyway), drops the proxy/1271 complexity, and unblocks the entire Phase 5 flow on a single architecture the docs actually describe. The cost is the "Polymarket-style deposit wallet" UX which we never had a strong reason to copy in the first place.
+
+### Side investigation: pre-existing 131.99 pUSD on `0x58CA52ebe0DadfdF531Cde7062e76746de4Db1eB`
+
+During spike Phase 1 I mis-identified the deposit wallet as `0x58CA52eb…` (the address in the factory event's `data` field). Probing both candidates revealed that **`0x58CA52eb…` is a shared Polymarket contract** (full bytecode, returns its own address from `eip712Domain()` but `owner() = 0x0`). It is NOT a per-owner deposit wallet — likely a shared implementation or liquidity pool used by many deposit wallet proxies.
+
+The 131.99 pUSD balance on `0x58CA52eb…` is **NOT ours**. It belongs to whatever shared mechanism that contract serves. Per the deterministic-CREATE2 derivation, our real deposit wallet's address depends on our owner EOA, and that wallet (`0xF4be72ae…`) had **0 pUSD** prior to our auto-funding step. The spike auto-funded 3 pUSD from the deployer EOA → real deposit wallet (tx `0x9c5ee2a059e5cdfb31f2c0295bfbe0f60297f91afd93ff9575ba22cfe839a8e8`). 1.99 pUSD remains on the deployer EOA.
+
+**Operator-facing implication:** the deployer EOA holds 1.99 pUSD; the real deposit wallet holds 3 pUSD (now locked in there until we either successfully trade with it or call a withdrawal flow). Both are spendable assets we control. The 131.99 pUSD elsewhere is not ours and should not be referenced in future Phase 5 calculations.
+
+### Key artifacts
+
+- `packages/polymarket-client/scripts/spike-deposit-wallet.ts` — full Path B + B-1 spike
+- `packages/polymarket-client/scripts/verify-1271.ts` — empirical confirmation of the wrap
+- `packages/polymarket-client/scripts/probe-wallet.ts` — wallet probe (eip712Domain, owner)
+- `packages/polymarket-client/scripts/verify-hash-math.ts` — appDomainSep + contentsHash hash math sanity
+- `packages/polymarket-client/scripts/.spike-state.json` — operator-controlled state (gitignored)
 
 ---
 

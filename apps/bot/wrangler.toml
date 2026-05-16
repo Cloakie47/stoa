@@ -1,0 +1,59 @@
+name = "stoa-bot"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ── D1 binding ──────────────────────────────────────────────────────────────
+# Create with: wrangler d1 create stoa-bot-db
+# Then put the returned database_id below and re-run wrangler deploy.
+[[d1_databases]]
+binding = "DB"
+database_name = "stoa-bot-db"
+database_id = "7a44c9d1-57ec-49a4-a8e6-e0f9d9e60902"
+
+# ── Plain env vars (NON-secret, safe to commit) ─────────────────────────────
+[vars]
+ARC_TESTNET_RPC = "https://rpc.testnet.arc.network"
+ARC_CHAIN_ID = "5042002"
+BASE_RPC = "https://mainnet.base.org"
+BASE_CHAIN_ID = "8453"
+
+# Arc Testnet addresses
+ARC_USDC = "0x3600000000000000000000000000000000000000"
+STOA_SETTLER = "0x05a98A1dCa17917B6e8B19306c1653fA9FC5d689"
+STOA_SPLITTER = "0x114942B5FeebFDf9F1FA2F161eA9C2A1754C407F"
+STOA_TRACEPIN = "0x657355b621494C5F99253ce9A4c2cE8B9b488B7B"
+
+# Base addresses (Limitless target)
+BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+# Stoa-routed payment amounts (USDC, 6 decimals)
+# 0.10 USDC = 100000; 0.20 USDC = 200000.
+STOA_FEE_ANALYZE_USDC = "100000"
+STOA_FEE_CONFIRM_USDC = "200000"
+
+# ── Secrets (set via wrangler secret put NAME) ──────────────────────────────
+# Required:
+#   TELEGRAM_BOT_TOKEN          - get from @BotFather on Telegram
+#   ANTHROPIC_API_KEY           - sk-ant-... (used by /preview only — the
+#                                  analyzer service has its own copy for /analyze)
+#   WALLET_ENCRYPTION_KEY       - 32 bytes hex, master key for per-user PK encryption
+#   OPERATOR_PRIVATE_KEY        - 0x-hex, operator wallet (pays gas on Arc)
+#   STOA_RECIPIENT_OPERATOR     - 0x... receives 70% of split fees
+#   STOA_RECIPIENT_MAINTAINERS  - 0x... receives 20%
+#   STOA_RECIPIENT_CANTEEN      - 0x... receives 10%
+#
+#   ANALYZER_URL                - https://stoa-analyzer.up.railway.app
+#                                  (Railway service URL; no trailing slash)
+#   ANALYZER_HMAC_SECRET        - 64+ random hex chars; MUST match the value
+#                                  set on the Railway analyzer side. Used to
+#                                  sign /jobs/* (bot→analyzer) AND verify
+#                                  /internal/db/* (analyzer→bot).
+#
+# Optional:
+#   TELEGRAM_WEBHOOK_SECRET     - shared with Telegram webhook setup, validates incoming reqs
+#   PINATA_JWT                  - IPFS pinning for trace storage (analyzer has its own copy)
+#   LIMITLESS_TOKEN_ID          - scoped Limitless API token id (mocked until provisioned)
+#   LIMITLESS_TOKEN_SECRET      - scoped Limitless API token secret
+#   TEST_USER_TG_ID             - for simulator: a Telegram id to seed as the test user
+#   TEST_USER_PRIVATE_KEY       - for simulator: hardcoded test wallet PK (Arc + Base)

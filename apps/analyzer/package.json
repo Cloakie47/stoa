@@ -1,0 +1,28 @@
+{
+  "name": "@stoa/analyzer",
+  "version": "0.0.1",
+  "description": "Long-running pipeline service for the Stoa bot. Runs /analyze (multi-agent LLM + Stoa atomic split + trace pin) and /confirm (Stoa split + mocked Limitless trade) past Cloudflare Workers' 30-second cap. Deployed to Railway. The bot Worker enqueues jobs here via HMAC-signed POST; the analyzer DMs results to users via direct Telegram API call.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stoa/bot-core": "file:../../packages/bot-core",
+    "@stoa/insight-engine": "file:../../packages/insight-engine",
+    "express": "^4.21.0",
+    "viem": "^2.39.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "pnpm@9.15.4"
+}

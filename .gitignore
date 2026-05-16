@@ -38,3 +38,7 @@ keystores/
 
 # Claude Code local state
 .claude/
+
+# Spike state files (local-only operator artifacts)
+.spike-state.json
+**/.spike-state.json

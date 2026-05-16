@@ -1,0 +1,42 @@
+{
+  "name": "@stoa/bot-core",
+  "version": "0.0.1",
+  "description": "Platform-agnostic business logic for the Stoa bot: viem wallet helpers, EIP-3009 + StoaSettler integration, insight-engine wrapper, Limitless mock, Telegram helpers, and the long-running analyze/confirm pipelines. Consumed by apps/bot (Cloudflare Worker) and apps/analyzer (Railway/Express).",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.88.0",
+    "@stoa/insight-engine": "file:../insight-engine",
+    "viem": "^2.39.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "pnpm@9.15.4"
+}

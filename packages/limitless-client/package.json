@@ -1,13 +1,13 @@
 {
-  "name": "@stoa/polymarket-client",
+  "name": "@stoa/limitless-client",
   "version": "0.0.1",
-  "description": "Thin wrapper around @polymarket/clob-client-v2 for Stoa InsightAgent. Exposes a stable surface (getMarket, prepareOrder, submitOrder, getBuilderTrades, cancelOrder) and isolates the smoke-test path from real submission.",
+  "description": "Thin wrapper around the Limitless Exchange Programmatic API for the Stoa InsightAgent bot. Exposes a stable surface (getMarket, createSubAccount, prepareOrder, submitOrder, cancelOrder, getOpenOrders, getTrades) on top of Limitless's HMAC-auth + delegated-signing model.",
   "license": "MIT",
   "author": "Stoa contributors",
   "repository": {
     "type": "git",
     "url": "https://github.com/Cloakie47/stoa.git",
-    "directory": "packages/polymarket-client"
+    "directory": "packages/limitless-client"
   },
   "type": "module",
   "main": "./dist/index.cjs",
@@ -34,13 +34,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "smoke:prepare": "tsx scripts/smoke-test-polymarket.ts",
-    "smoke:submit": "tsx scripts/smoke-test-polymarket.ts --submit",
-    "setup:pusd": "tsx scripts/setup-pusd.ts",
-    "spike:deposit-wallet": "tsx scripts/spike-deposit-wallet.ts"
+    "smoke:markets": "tsx scripts/smoke-test-markets.ts"
   },
   "dependencies": {
-    "@polymarket/clob-client-v2": "^1.0.0",
     "viem": "^2.39.0"
   },
   "devDependencies": {
@@ -52,9 +48,9 @@
   },
   "packageManager": "pnpm@9.15.4",
   "keywords": [
-    "polymarket",
-    "clob",
+    "limitless",
     "prediction-markets",
-    "builder-code"
+    "base",
+    "stoa"
   ]
 }

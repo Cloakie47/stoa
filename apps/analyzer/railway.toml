@@ -1,0 +1,20 @@
+# Railway service config for @stoa/analyzer.
+#
+# Apply by either:
+#   (a) pushing this repo to a Railway project where the service is rooted
+#       at the repo root with Dockerfile path = apps/analyzer/Dockerfile, OR
+#   (b) running `railway up` from the repo root with this file present.
+#
+# Required env vars to set in the Railway dashboard (see apps/analyzer/README.md
+# for the full list and example values).
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "apps/analyzer/Dockerfile"
+
+[deploy]
+startCommand = "node dist/index.js"
+healthcheckPath = "/"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

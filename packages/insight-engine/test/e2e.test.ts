@@ -157,9 +157,9 @@ describe.skipIf(skip)("analyzeMarket — real LLM + Polymarket integration", () 
           "[e2e] DEPLOYER_PRIVATE_KEY / ARC_TESTNET_RPC / TRACEPIN_ADDRESS missing — running with pinOnChain=false.",
         );
       }
-      if (!process.env.PINATA_JWT && !process.env.STORACHA_KEY) {
+      if (!process.env.PINATA_JWT) {
         console.warn(
-          "[e2e] No IPFS backend configured. Pin step will use cid='' on-chain.",
+          "[e2e] PINATA_JWT not set. Pin step will use cid='' on-chain.",
         );
       }
 
