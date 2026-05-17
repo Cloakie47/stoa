@@ -13,7 +13,16 @@
  * simulator; HTTP-proxied via /internal endpoints when called from the
  * Railway analyzer service).
  */
-import type { FullTrace, JudgeTrace } from "@stoa/insight-engine";
+import {
+  fetchMarketContext,
+  NoAnalyzableSubMarketError,
+} from "@stoa/insight-engine";
+import type {
+  FullTrace,
+  JudgeTrace,
+  MarketContext,
+  SubMarketSelection,
+} from "@stoa/insight-engine";
 
 import type { BotCoreConfig } from "./config.js";
 import { feeAnalyzeMicros, feeConfirmMicros } from "./config.js";
@@ -95,7 +104,27 @@ export async function runAnalyzePipeline(
       `[analyze:${requestId}] arc=$${arcBalUsd.toFixed(2)} base=$${baseBalUsd.toFixed(2)} bankroll=$${bankrollUsd.toFixed(2)}`,
     );
 
-    const analysis = await runFullAnalysis(cfg, marketUrl, bankrollUsd);
+    // ── Pre-flight context resolution ──────────────────────────────────────
+    // Fetch the MarketContext BEFORE the Stoa fee charge so we can refuse
+    // gracefully (and return no-charge) when an event URL has no analyzable
+    // sub-markets. The insight-engine throws NoAnalyzableSubMarketError in
+    // that case — we catch it here, send the refuse message, and exit.
+    let context: MarketContext;
+    try {
+      context = await fetchMarketContext(marketUrl);
+    } catch (e) {
+      if (e instanceof NoAnalyzableSubMarketError) {
+        const message = formatNoAnalyzableSubMarketMessage(e.selection, requestId);
+        await sendTelegramMessage(cfg.TELEGRAM_BOT_TOKEN, chatId, message);
+        console.log(
+          `[runAnalyzePipeline] req=${requestId} refused — no analyzable sub-markets (${e.selection.totalSubMarkets} total, ${e.selection.extremeCount} extreme). No fee charged.`,
+        );
+        return null;
+      }
+      throw e;
+    }
+
+    const analysis = await runFullAnalysis(cfg, marketUrl, bankrollUsd, context);
 
     const feeId = await db.logFeeChargeStart(
       telegramUserId,
@@ -322,6 +351,9 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   const no = 1 - yes;
   const pYes = clamp01(j.model_probability_yes);
 
+  // ── Section 0: sub-market disambiguation callout (event URLs only) ──────
+  const calloutBlock = renderSubMarketCalloutBlock(j.sub_market_selection);
+
   // ── Section 1: verdict header ───────────────────────────────────────────
   const verdictEmoji =
     j.signal === "YES" ? "📈" : j.signal === "NO" ? "📉" : "⏸";
@@ -396,6 +428,8 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   const requestFooter = `_Request \`${requestId}\` — $0.15 charged, split 70/20/10 atomic on Arc._`;
 
   const parts: (string | null)[] = [
+    calloutBlock,
+    calloutBlock ? "" : null,
     ...headerLines,
     "",
     ...marketLines,
@@ -608,4 +642,91 @@ function formatVerdict(signal: JudgeTrace["signal"]): string {
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max - 1) + "…";
+}
+
+/**
+ * Human-readable USD volume formatter. Telegram users skim — kilo/mega
+ * suffixes beat raw 7-digit numbers. Always returns a $-prefixed string.
+ *
+ *   $1,234,567 → "$1.23M"
+ *   $27,170,900 → "$27.17M"
+ *   $1,200 → "$1.2k"
+ *   $60 → "$60"
+ */
+function humanFormatVolume(usd: number): string {
+  if (!Number.isFinite(usd) || usd < 0) return "$?";
+  if (usd >= 1_000_000) return `$${(usd / 1_000_000).toFixed(2)}M`;
+  if (usd >= 1_000) return `$${(usd / 1_000).toFixed(1)}k`;
+  return `$${Math.round(usd)}`;
+}
+
+/**
+ * Pre-header callout for event URLs. Returns null for direct market URLs
+ * (no selection happened) or when the selection metadata is missing — in
+ * either case the formatter skips this section entirely.
+ *
+ * When the event has multiple moderate sub-markets, lists up to 3
+ * alternatives. When there's only one moderate sub-market, replaces the
+ * "Other moderate-priced options" list with a single explanatory line.
+ *
+ * NEVER rendered when selection.selected is null — that path is the
+ * refuse-and-no-charge case handled in {@link formatNoAnalyzableSubMarketMessage},
+ * which the pipeline invokes before the formatter ever runs.
+ */
+function renderSubMarketCalloutBlock(
+  selection: SubMarketSelection | null | undefined,
+): string | null {
+  if (!selection || !selection.isEventUrl || !selection.selected) return null;
+  const sel = selection.selected;
+  const yes = `$${sel.yesPrice.toFixed(2)}`;
+  const vol = humanFormatVolume(sel.volumeUsd);
+  const lines = [
+    `ℹ️ *Sub-market selected*`,
+    `This event has ${selection.totalSubMarkets} sub-markets. I analyzed the highest-volume one in moderate price range:`,
+    `  "${truncate(sel.question, 160)}" (YES ${yes}, ${vol} volume)`,
+    "",
+  ];
+  if (selection.alternatives.length > 0) {
+    lines.push(
+      `Other moderate-priced options (${selection.moderateCount - 1} total):`,
+    );
+    for (const alt of selection.alternatives) {
+      lines.push(
+        `  • ${truncate(alt.question, 130)} (YES $${alt.yesPrice.toFixed(2)})`,
+      );
+    }
+    lines.push("");
+  } else {
+    lines.push(`This was the only moderate-priced sub-market in this event.`);
+    lines.push("");
+  }
+  lines.push(
+    `Paste a specific sub-market URL to analyze it directly. ${selection.extremeCount} sub-markets were skipped because they're at extreme prices (>$0.90 or <$0.10) where no meaningful edge can exist.`,
+    "",
+    "────────────────────────────────────────",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Refuse-and-no-charge message for events where every sub-market is at
+ * extreme prices. Sent by {@link runAnalyzePipeline} BEFORE any fee charge.
+ * Mirror of the regular formatter's request footer so the user still sees a
+ * request-id correlation, but without the "$0.15 charged" — because we did
+ * not charge.
+ */
+function formatNoAnalyzableSubMarketMessage(
+  selection: SubMarketSelection,
+  requestId: string,
+): string {
+  return [
+    `ℹ️ *No analyzable sub-markets in this event*`,
+    `All ${selection.totalSubMarkets} sub-markets in this event are at extreme prices (>$0.90 or <$0.10). No meaningful edge can be analyzed — the market is already pricing these as near-certainties.`,
+    "",
+    `Try one of:`,
+    `  • Paste a specific sub-market URL directly`,
+    `  • Use a different event URL with active price discovery`,
+    "",
+    `_Request \`${requestId}\` — no fee charged._`,
+  ].join("\n");
 }

@@ -204,6 +204,13 @@ export interface JudgeTrace extends AgentTrace {
   calibration_adjustment?: CalibrationAdjustment;
   /** Always set — explanation of the recommendation (size or PASS reason). */
   recommendation_reason: string;
+  /**
+   * Sub-market disambiguation metadata. Set programmatically by the
+   * orchestrator from the MarketContext — the Judge LLM does not emit
+   * this field. Null when the user pasted a direct /market/<slug> URL
+   * (no selection occurred).
+   */
+  sub_market_selection?: SubMarketSelection | null;
 }
 
 /**
@@ -283,6 +290,45 @@ export interface FullTrace {
 }
 
 /**
+ * Sub-market disambiguation result for a Polymarket event URL.
+ *
+ * Polymarket events (e.g. `/event/2026-fifa-world-cup-winner-595`) bundle
+ * many child markets — for FIFA it's 48 candidate countries. The bot's
+ * sub-market selector applies a [0.10, 0.90] moderate-price filter, picks
+ * the highest-volume survivor, and discards the rest. This record captures
+ * the selection so the user can see WHICH sub-market was analyzed (instead
+ * of silently getting a different question than they pasted) and so the
+ * IPFS-pinned trace records the decision for audit.
+ *
+ * - `isEventUrl` distinguishes the multi-sub-market case from a direct
+ *   /market/<slug> URL (where no selection happened).
+ * - `selected = null` means every sub-market was at extreme prices — the
+ *   pipeline refuses to charge for an un-analyzable question.
+ */
+export interface SubMarketSelection {
+  isEventUrl: boolean;
+  totalSubMarkets: number;
+  /** Sub-markets in [0.10, 0.90]. */
+  moderateCount: number;
+  /** Sub-markets outside the moderate band (skipped). */
+  extremeCount: number;
+  /** Null when no moderate sub-market exists — the pipeline refuses. */
+  selected: {
+    question: string;
+    yesPrice: number;
+    volumeUsd: number;
+    slug: string;
+    directUrl: string;
+  } | null;
+  /** Up to 3 other moderate-priced sub-markets, sorted by volume desc. */
+  alternatives: Array<{
+    question: string;
+    yesPrice: number;
+    directUrl: string;
+  }>;
+}
+
+/**
  * Minimal market context the orchestrator extracts and passes to every agent.
  * Agents may fetch more via their own tools.
  */
@@ -306,4 +352,12 @@ export interface MarketContext {
   condition_id?: string;
   /** Raw CLOB token IDs for YES/NO — needed for orderbook queries. */
   token_ids?: { yes?: string; no?: string };
+  /**
+   * Populated by {@link fetchMarketContext} when the URL was an event
+   * (multi-sub-market) URL. Carries the selection metadata downstream so
+   * the Judge trace + Telegram formatter can surface which sub-market was
+   * chosen and which alternatives existed. Undefined / null for direct
+   * market URLs.
+   */
+  sub_market_selection?: SubMarketSelection | null;
 }

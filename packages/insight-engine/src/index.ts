@@ -67,6 +67,9 @@ export {
   getOrderbook,
   getPriceHistory,
   summarizeOrderbook,
+  NoAnalyzableSubMarketError,
+  MODERATE_PRICE_LOW,
+  MODERATE_PRICE_HIGH,
 } from "./polymarket.js";
 export {
   pinTraceOnChain,
@@ -98,6 +101,7 @@ export type {
   Signal,
   EvidenceItem,
   TokenUsage,
+  SubMarketSelection,
 } from "./types.js";
 
 /**

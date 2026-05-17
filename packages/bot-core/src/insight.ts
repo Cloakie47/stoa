@@ -75,10 +75,15 @@ export async function runFullAnalysis(
   cfg: BotCoreConfig,
   marketUrl: string,
   userBalanceUsdc: number,
+  /** Pre-resolved context. Passed through when the pipeline already called
+   *  fetchMarketContext separately (e.g. to refuse early on event URLs with
+   *  no analyzable sub-markets before charging the fee). */
+  preFetchedContext?: MarketContext,
 ): Promise<FullAnalysis> {
   plumbEnv(cfg);
   const result = await analyzeMarket(marketUrl, userBalanceUsdc, {
     pinOnChain: false,
+    preFetchedContext,
   });
 
   // ── Apply calibration policy ───────────────────────────────────────────

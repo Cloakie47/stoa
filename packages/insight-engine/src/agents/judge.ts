@@ -350,6 +350,10 @@ export async function runJudgeAgent(
       typeof p.resolution_date_estimate === "string"
         ? p.resolution_date_estimate
         : null,
+    // Programmatically set from the MarketContext (not LLM-emitted) so the
+    // pinned JudgeTrace records which sub-market the bot picked out of the
+    // event. Null for direct /market/<slug> URLs where no selection happened.
+    sub_market_selection: input.context.sub_market_selection ?? null,
     recommendation_reason: rec.reason,
     timestamp: new Date().toISOString(),
     model,

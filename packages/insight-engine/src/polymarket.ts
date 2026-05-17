@@ -14,7 +14,27 @@
  * orchestrator can surface them in the trace.
  */
 
-import type { MarketContext } from "./types.js";
+import type { MarketContext, SubMarketSelection } from "./types.js";
+
+/**
+ * Raised by {@link fetchMarketContext} when the URL resolves to a multi-
+ * sub-market event but every sub-market is at extreme prices ([0,0.10) or
+ * (0.90,1]). The orchestrator catches this and refuses to charge — there's
+ * no defensible edge to find in lottery-priced contracts.
+ *
+ * Carries the populated {@link SubMarketSelection} so the caller can render
+ * a clear refuse message ("All N sub-markets are extreme; no fee charged").
+ */
+export class NoAnalyzableSubMarketError extends Error {
+  selection: SubMarketSelection;
+  constructor(selection: SubMarketSelection) {
+    super(
+      `Event has ${selection.totalSubMarkets} sub-market(s), none in moderate [${MODERATE_PRICE_LOW}, ${MODERATE_PRICE_HIGH}] range.`,
+    );
+    this.name = "NoAnalyzableSubMarketError";
+    this.selection = selection;
+  }
+}
 
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
@@ -275,11 +295,11 @@ export async function fetchMarketContext(url: string): Promise<MarketContext> {
   // ── Sub-market selection ─────────────────────────────────────────────────
   // Naïve highest-volume picks the near-resolved long-shot ($0.001 Bolívar,
   // $0.002 Uzbekistan) because those tend to have high cumulative volume
-  // from their pre-resolution life. Prefer sub-markets whose YES price is in
-  // a moderate range — those have actual edge available. Fall back to
-  // highest-volume overall only when no moderate-range candidate exists
-  // (every-candidate-is-a-longshot events) and log the fallback so the
-  // selection rationale is visible in the trace.
+  // from their pre-resolution life. Restrict to the moderate price band so
+  // there's real edge to find. When NO sub-market is in band, throw
+  // NoAnalyzableSubMarketError — the pipeline refuses to charge for a
+  // lottery-priced event rather than running an analysis on a market that
+  // cannot have meaningful edge.
   const annotated = candidates.map((raw) => {
     const yesPrice = getYesPriceFromRaw(raw);
     const vol = parseVolume(raw);
@@ -291,43 +311,79 @@ export async function fetchMarketContext(url: string): Promise<MarketContext> {
   });
 
   const moderate = annotated.filter((a) => a.inModerate);
-  const pool = moderate.length > 0 ? moderate : annotated;
-  const sorted = [...pool].sort((a, b) => b.vol - a.vol);
-  const picked = sorted[0]!;
-  const usedFallback = moderate.length === 0;
+  const totalSubMarkets = annotated.length;
+  const moderateCount = moderate.length;
+  const extremeCount = totalSubMarkets - moderateCount;
 
-  // Log every sub-market with price + volume + filter outcome so the trace
-  // shows exactly why we picked what we picked.
   const fmtPrice = (p?: number) =>
     typeof p === "number" ? `$${p.toFixed(3)}` : "$?.???";
   const fmtVol = (v: number) =>
     v >= 1000
       ? `$${(v / 1000).toFixed(1)}k`
       : `$${Math.round(v).toLocaleString()}`;
+  const buildDirectUrl = (marketSlug: string) =>
+    `https://polymarket.com/event/${event.slug}/${marketSlug}`;
+
+  // Log every sub-market with price + volume + filter outcome so the trace
+  // shows exactly why we picked what we picked.
   const annotatedForLog = [...annotated].sort((a, b) => b.vol - a.vol);
   const lines = annotatedForLog
     .map((a) => {
-      const tag = a.inModerate
-        ? "moderate, candidate"
-        : `extreme, ${usedFallback ? "in fallback pool" : "skipped"}`;
+      const tag = a.inModerate ? "moderate, candidate" : "extreme, skipped";
       return `    "${a.raw.question.slice(0, 60)}" YES=${fmtPrice(
         a.yesPrice,
       )} vol=${fmtVol(a.vol)} [${tag}]`;
     })
     .join("\n");
-  const filterSummary = usedFallback
-    ? `Filter: 0 in [${MODERATE_PRICE_LOW}, ${MODERATE_PRICE_HIGH}], ${annotated.length} extreme — FALLBACK to highest-volume overall.`
-    : `Filter: ${moderate.length} in [${MODERATE_PRICE_LOW}, ${MODERATE_PRICE_HIGH}], ${
-        annotated.length - moderate.length
-      } extreme.`;
-  const selectedLabel = usedFallback
-    ? "Selected highest-volume (fallback — no moderate-range candidates):"
-    : "Selected highest-volume in moderate range:";
+  const filterSummary = `Filter: ${moderateCount} in [${MODERATE_PRICE_LOW}, ${MODERATE_PRICE_HIGH}], ${extremeCount} extreme.`;
+
+  // ── No moderate sub-markets → refuse ─────────────────────────────────────
+  if (moderateCount === 0) {
+    const selection: SubMarketSelection = {
+      isEventUrl: totalSubMarkets > 1,
+      totalSubMarkets,
+      moderateCount: 0,
+      extremeCount,
+      selected: null,
+      alternatives: [],
+    };
+    console.log(
+      `[fetchMarketContext] Event URL — ${totalSubMarkets} sub-markets:\n${lines}\n  ${filterSummary}\n  REFUSED — no moderate sub-markets; throwing NoAnalyzableSubMarketError.`,
+    );
+    throw new NoAnalyzableSubMarketError(selection);
+  }
+
+  // ── Pick highest-volume moderate sub-market ──────────────────────────────
+  const sortedModerate = [...moderate].sort((a, b) => b.vol - a.vol);
+  const picked = sortedModerate[0]!;
+  const altRaws = sortedModerate.slice(1, 4);
+
+  const selection: SubMarketSelection = {
+    isEventUrl: totalSubMarkets > 1,
+    totalSubMarkets,
+    moderateCount,
+    extremeCount,
+    selected: {
+      question: picked.raw.question,
+      yesPrice: picked.yesPrice ?? 0,
+      volumeUsd: picked.vol,
+      slug: picked.raw.slug,
+      directUrl: buildDirectUrl(picked.raw.slug),
+    },
+    alternatives: altRaws.map((a) => ({
+      question: a.raw.question,
+      yesPrice: a.yesPrice ?? 0,
+      directUrl: buildDirectUrl(a.raw.slug),
+    })),
+  };
+
   console.log(
-    `[fetchMarketContext] Event URL — ${annotated.length} sub-markets:\n${lines}\n  ${filterSummary}\n  ${selectedLabel} "${picked.raw.question}" (YES=${fmtPrice(picked.yesPrice)}, vol=${fmtVol(picked.vol)}, slug=${picked.raw.slug})`,
+    `[fetchMarketContext] Event URL — ${totalSubMarkets} sub-markets:\n${lines}\n  ${filterSummary}\n  Selected highest-volume in moderate range: "${picked.raw.question}" (YES=${fmtPrice(picked.yesPrice)}, vol=${fmtVol(picked.vol)}, slug=${picked.raw.slug})`,
   );
 
-  return buildContextFromMarketRaw(url, picked.raw);
+  const ctx = buildContextFromMarketRaw(url, picked.raw);
+  ctx.sub_market_selection = selection;
+  return ctx;
 }
 
 interface OrderbookLevel {
