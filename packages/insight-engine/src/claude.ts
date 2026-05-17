@@ -144,6 +144,67 @@ export const AGENT_TRACE_JSON_SCHEMA = {
 };
 
 /**
+ * Historical agent's structured-output schema. Adds the required
+ * reference-class fields on top of the standard AgentTrace shape. The
+ * extra fields are the disciplined output we enforce so the Historical
+ * agent cannot fabricate base rates undetectably — every numeric claim
+ * is paired with a defined reference class + ≥2 specific examples.
+ */
+export const HISTORICAL_TRACE_JSON_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    ...AGENT_TRACE_JSON_SCHEMA.properties,
+    reference_class: {
+      type: ["string", "null"] as const,
+      description:
+        "One-sentence definition of the reference class for this question (e.g., 'humanoid robot endurance demos by Tesla/Agility/Apptronik/1X/Unitree/Figure since 2023'). NULL if no defensible reference class exists — fabricating one is forbidden.",
+    },
+    reference_class_size: {
+      type: ["integer", "null"] as const,
+      description:
+        "Count N of historical cases in the reference class. NULL when reference_class is NULL.",
+    },
+    resolved_at_or_above_rate: {
+      type: ["number", "null"] as const,
+      description:
+        "Fraction in [0,1] of the reference class that resolved at or above the target performance. NULL when reference_class is NULL.",
+    },
+    specific_examples: {
+      type: "array" as const,
+      description:
+        "AT LEAST 2 specific named examples backing the reference class, with one-line context each. Empty array [] when reference_class is NULL.",
+      items: { type: "string" as const },
+    },
+    confidence_in_reference_class: {
+      type: "string" as const,
+      enum: ["high", "medium", "low", "none"] as const,
+      description:
+        "How defensible is the reference class? 'none' when reference_class is NULL. 'low' when reference_class_size < 5.",
+    },
+    notes_on_reference_class_limitations: {
+      type: "string" as const,
+      description:
+        "Caveats: selection bias, recency, sample size, novelty vs. analogues. Always populated, even when reference_class is NULL.",
+    },
+  },
+  required: [
+    "thesis",
+    "evidence",
+    "counter_arguments",
+    "confidence",
+    "signal",
+    "reasoning",
+    "reference_class",
+    "reference_class_size",
+    "resolved_at_or_above_rate",
+    "specific_examples",
+    "confidence_in_reference_class",
+    "notes_on_reference_class_limitations",
+  ],
+  additionalProperties: false,
+};
+
+/**
  * JSON Schema for the Judge's output. Extends AgentTrace with the
  * Metaculus-template forecasting fields + the agent-signal snapshot.
  *
@@ -226,16 +287,19 @@ export const JUDGE_TRACE_JSON_SCHEMA = (() => {
         description:
           "Signed integer — (model_p_yes - market_p_yes) * 10000. Advisory.",
       },
-      // Metaculus-template forecasting fields
+      // Metaculus-template forecasting fields. Nullable when the Historical
+      // agent could not identify a defensible reference class — in that case
+      // the Judge sets both to null and forms model_p_yes from inside view
+      // reasoning alone (noting this in the rationale).
       outside_view_p_yes: {
-        type: "number" as const,
+        type: ["number", "null"] as const,
         description:
-          "The historical base rate alone, ignoring this case's specifics. In [0,1].",
+          "The historical base rate alone in [0,1]. NULL when the Historical agent set reference_class=null (no defensible reference class identified). When NULL, the Judge formed the estimate from inside-view reasoning only.",
       },
       inside_view_adjustment: {
-        type: "number" as const,
+        type: ["number", "null"] as const,
         description:
-          "Signed: how far inside-view adjusted the estimate away from outside_view_p_yes. (inside_view_p_yes - outside_view_p_yes.)",
+          "Signed: model_probability_yes - outside_view_p_yes. NULL when outside_view_p_yes is NULL.",
       },
       status_quo_outcome: {
         type: "string" as const,

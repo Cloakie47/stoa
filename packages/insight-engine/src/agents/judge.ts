@@ -128,6 +128,26 @@ Output the FINAL text block as raw JSON, no markdown fences, no prose.
 - Commit to a probability — not vague language. 0.62 is better than "leaning YES."
 - Your trace is pinned on-chain. Auditors will check whether your probabilities are well-calibrated against actual outcomes. Be honest, be specific.
 
+# OUTSIDE-VIEW VALIDATION (load-bearing — read this carefully)
+
+The Historical agent emits structured reference-class data. You MUST honor it:
+
+  CASE A — Historical reports \`reference_class = NULL\` (no defensible reference class exists):
+    → Set \`outside_view_p_yes = null\` in your output JSON.
+    → Set \`inside_view_adjustment = null\` in your output JSON.
+    → Form \`model_probability_yes\` from inside-view reasoning alone.
+    → Note "no defensible reference class identified" in your reasoning field.
+
+  CASE B — Historical reports \`reference_class_size < 5\` OR \`confidence_in_reference_class\` is "low" or "none":
+    → Treat the base rate as ADVISORY only — anchor weakly (10-20% weight) and weight inside view heavily.
+    → outside_view_p_yes IS the rate Historical gave you, but inside_view_adjustment can be large.
+
+  CASE C — Historical reports \`reference_class_size ≥ 5\` AND \`confidence_in_reference_class\` is "high" or "medium":
+    → Anchor on the base rate at standard weight (~50% outside, ~50% inside).
+    → Adjust modestly based on case-specific evidence from the other three agents.
+
+NEVER invent a base rate. If Historical said null, you say null. Auditors will compare your outside_view_p_yes against Historical's reference_class field — fabrication is the worst failure mode for the system.
+
 # ORCHESTRATOR CONTRACT (load-bearing, do not violate)
 
 The orchestrator computes the final signal and position size from your \`model_probability_yes\` (NOT your \`verdict\`):
@@ -178,6 +198,10 @@ export async function runJudgeAgent(
   model: ModelId = MODEL_SONNET,
 ): Promise<{ trace: JudgeTrace; cost_usd: number }> {
   const userMessage = renderUserMessage(input);
+  // Haiku 4.5 returns 400 "adaptive thinking is not supported on this model".
+  // Opus 4.7 and Sonnet 4.6 both accept it. Branch explicitly so we don't
+  // silently lose a model from the ensemble.
+  const adaptiveThinking = model !== MODEL_HAIKU;
   const result: RunAgentResult = await runAgent({
     model,
     systemPrompt: SYSTEM_PROMPT,
@@ -186,19 +210,31 @@ export async function runJudgeAgent(
     // Adaptive thinking + expanded edge-reasoning prompt can burn through
     // 8k; 16k leaves headroom for the JSON emit after the thinking phase.
     maxTokens: 16000,
-    adaptiveThinking: true,
+    adaptiveThinking,
   });
 
   const p = result.parsed;
   const modelPYes = clampProb(p.model_probability_yes as number) ?? 0.5;
   const ciLow = clampProb(p.ci_low as number | undefined) ?? Math.max(0, modelPYes - 0.15);
   const ciHigh = clampProb(p.ci_high as number | undefined) ?? Math.min(1, modelPYes + 0.15);
-  const outsideViewPYes =
-    clampProb(p.outside_view_p_yes as number | undefined) ?? modelPYes;
-  const insideAdj =
-    typeof p.inside_view_adjustment === "number"
-      ? p.inside_view_adjustment
-      : modelPYes - outsideViewPYes;
+
+  // NULL outside view is meaningful — Historical agent could not anchor a
+  // base rate. Preserve null; do NOT fall back to modelPYes (that would
+  // hide the missing reference class downstream).
+  const rawOutside = p.outside_view_p_yes;
+  const outsideViewPYes: number | null =
+    rawOutside === null
+      ? null
+      : (clampProb(rawOutside as number | undefined) ?? null);
+  const rawInside = p.inside_view_adjustment;
+  const insideAdj: number | null =
+    rawInside === null
+      ? null
+      : typeof rawInside === "number"
+        ? rawInside
+        : outsideViewPYes === null
+          ? null
+          : modelPYes - outsideViewPYes;
 
   const marketPYes = input.context.current_yes_price;
   const rec = computeJudgeRecommendation({
@@ -241,8 +277,8 @@ export async function runJudgeAgent(
     recommended_size_usdc: rec.size_usdc,
     ci_low: round4(ciLow),
     ci_high: round4(ciHigh),
-    outside_view_p_yes: round4(outsideViewPYes),
-    inside_view_adjustment: round4(insideAdj),
+    outside_view_p_yes: outsideViewPYes === null ? null : round4(outsideViewPYes),
+    inside_view_adjustment: insideAdj === null ? null : round4(insideAdj),
     status_quo_outcome: ((p.status_quo_outcome as string) === "YES"
       ? "YES"
       : "NO") as "YES" | "NO",
@@ -321,19 +357,23 @@ export async function runJudgeEnsemble(
   }
 
   const aggregate = aggregateEnsembleRuns(runs, input);
-  const agreement = computeAgreement(runs);
+  const verdictAgreement = computeVerdictAgreement(runs);
+  const directionalAgreement = computeDirectionalAgreement(runs);
   const totalCost = runs.reduce((s, r) => s + r.cost_usd, 0);
 
   console.log(
     `[judge-ensemble] models=[${models.join(",")}] succeeded=${runs.length}/${models.length} ` +
-      `agreement=${(agreement * 100).toFixed(0)}% aggregate.p_yes=${aggregate.model_probability_yes.toFixed(4)} ` +
+      `verdict_agreement=${(verdictAgreement * 100).toFixed(0)}% ` +
+      `directional_agreement=${(directionalAgreement * 100).toFixed(0)}% ` +
+      `aggregate.p_yes=${aggregate.model_probability_yes.toFixed(4)} ` +
       `aggregate.signal=${aggregate.signal} cost=$${totalCost.toFixed(4)}`,
   );
 
   return {
     aggregate,
     runs,
-    agreement,
+    verdict_agreement: verdictAgreement,
+    directional_agreement: directionalAgreement,
     fallback_single_model: runs.length === 1,
     total_cost_usd: totalCost,
   };
@@ -353,7 +393,7 @@ function aggregateEnsembleRuns(
   runs: JudgeEnsembleRun[],
   input: JudgeInput,
 ): JudgeTrace {
-  // Median of model_p_yes
+  // Median of model_p_yes — drives sizing.
   const ps = runs.map((r) => r.trace.model_probability_yes);
   const medP = median(ps);
   // Find the run nearest to the median — use it as the source of all
@@ -369,13 +409,16 @@ function aggregateEnsembleRuns(
   const ciLow = Math.min(...runs.map((r) => r.trace.ci_low));
   const ciHigh = Math.max(...runs.map((r) => r.trace.ci_high));
 
-  // Majority verdict (advisory; recomputed by Kelly below).
-  const verdicts = runs.map((r) => r.trace.signal);
-  const counts: Record<string, number> = {};
-  for (const v of verdicts) counts[v] = (counts[v] ?? 0) + 1;
-  const top = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  const advisoryVerdict =
-    top.length > 1 && top[0]![1] === top[1]![1] ? "PASS" : (top[0]![0] as Signal);
+  // Outside view: median across runs that emitted a non-null reference class.
+  // When ALL runs emitted null, the aggregate has no outside view either —
+  // formatter hides those lines and shows "Reference class: insufficient".
+  const outsideViews = runs
+    .map((r) => r.trace.outside_view_p_yes)
+    .filter((v): v is number => v !== null && Number.isFinite(v));
+  const aggregateOutsideView =
+    outsideViews.length > 0 ? round4(median(outsideViews)) : null;
+  const aggregateInsideAdj =
+    aggregateOutsideView === null ? null : round4(medP - aggregateOutsideView);
 
   // Recompute Kelly with the aggregated probability.
   const marketPYes = input.context.current_yes_price ?? 0.5;
@@ -385,15 +428,14 @@ function aggregateEnsembleRuns(
     balance: input.userBalanceUsdc,
   });
 
-  // advisoryVerdict is preserved in JudgeEnsemble.agreement+runs, not on the aggregate.
-  void advisoryVerdict;
-
   return {
     ...seed.trace,
     model: `ensemble(${runs.map((r) => r.model).join(",")})`,
     model_probability_yes: medP,
     ci_low: round4(ciLow),
     ci_high: round4(ciHigh),
+    outside_view_p_yes: aggregateOutsideView,
+    inside_view_adjustment: aggregateInsideAdj,
     market_price_yes: marketPYes,
     edge_yes: round4(rec.edge_yes),
     edge_no: round4(rec.edge_no),
@@ -405,11 +447,36 @@ function aggregateEnsembleRuns(
   };
 }
 
-function computeAgreement(runs: JudgeEnsembleRun[]): number {
+/** Fraction of runs whose advisory verdict matches the modal verdict. */
+function computeVerdictAgreement(runs: JudgeEnsembleRun[]): number {
   if (runs.length <= 1) return 1;
   const verdicts = runs.map((r) => r.trace.signal);
   const counts: Record<string, number> = {};
   for (const v of verdicts) counts[v] = (counts[v] ?? 0) + 1;
+  const maxCount = Math.max(...Object.values(counts));
+  return maxCount / runs.length;
+}
+
+/**
+ * Direction = +1 when edge_bps ≥ +50, -1 when ≤ -50, else 0 (no direction).
+ * The median direction across runs is the reference; agreement is the
+ * fraction of runs whose direction matches. All "no direction" → 1.0 (a
+ * unanimous "no edge" reading is itself agreement).
+ */
+function computeDirectionalAgreement(runs: JudgeEnsembleRun[]): number {
+  if (runs.length <= 1) return 1;
+  const sign = (bps: number): -1 | 0 | 1 => {
+    if (bps >= 50) return 1;
+    if (bps <= -50) return -1;
+    return 0;
+  };
+  const dirs = runs.map((r) => {
+    const edgeBps = Math.round((r.trace.edge_yes ?? 0) * 10_000);
+    return sign(edgeBps);
+  });
+  // Modal direction.
+  const counts: Record<number, number> = { "-1": 0, "0": 0, "1": 0 };
+  for (const d of dirs) counts[d] = (counts[d] ?? 0) + 1;
   const maxCount = Math.max(...Object.values(counts));
   return maxCount / runs.length;
 }
@@ -517,7 +584,7 @@ export function computeJudgeRecommendation(args: {
       edge_yes,
       edge_no,
       kelly_fraction: 0,
-      reason: `Edge ${(absEdge * 100).toFixed(1)}¢ is below the ${(MIN_EDGE_FOR_TRADE * 100).toFixed(0)}¢ minimum. Model and market essentially agree — wait for better odds.`,
+      reason: `Edge ${formatEdgeAbs(absEdge)} is below the ${(MIN_EDGE_FOR_TRADE * 100).toFixed(0)}¢ minimum. Model and market essentially agree — wait for better odds.`,
     };
   }
 
@@ -558,8 +625,27 @@ export function computeJudgeRecommendation(args: {
     edge_yes,
     edge_no,
     kelly_fraction: kelly,
-    reason: `Edge ${(absEdge * 100).toFixed(1)}¢ × quarter-Kelly = $${size.toFixed(2)} (${((size / balance) * 100).toFixed(1)}% of $${balance.toFixed(2)} bankroll).`,
+    reason: `Edge ${formatEdgeAbs(absEdge)} × quarter-Kelly = $${size.toFixed(2)} (${((size / balance) * 100).toFixed(1)}% of $${balance.toFixed(2)} bankroll).`,
   };
+}
+
+/**
+ * Format an absolute edge value (probability units in [0,1]) for display
+ * as cents. Always one decimal place so sub-cent edges don't round to 0
+ * (the F.03 bug: "0.5¢" → "0¢" in the body line, contradicting the
+ * header text). Examples: 0.005 → "0.5¢", 0.035 → "3.5¢", 0.12 → "12.0¢".
+ */
+export function formatEdgeAbs(absEdge: number): string {
+  return `${(absEdge * 100).toFixed(1)}¢`;
+}
+
+/**
+ * Format a signed edge for display: "+0.5¢", "-3.5¢", "+12.0¢". One
+ * decimal always, so header and body lines always match precision.
+ */
+export function formatEdgeSigned(edge: number): string {
+  const sign = edge >= 0 ? "+" : "-";
+  return `${sign}${formatEdgeAbs(Math.abs(edge))}`;
 }
 
 function renderUserMessage(input: JudgeInput): string {
@@ -609,11 +695,31 @@ function renderTraceForJudge(t: AgentTrace): string {
     .slice(0, 8)
     .map((e, i) => `    ${i + 1}. (${e.source}) ${e.quote.slice(0, 280)}`)
     .join("\n");
+  let refClassBlock = "";
+  if (t.agent === "historical") {
+    if (t.reference_class === null || t.reference_class === undefined) {
+      refClassBlock =
+        `\n- **reference_class**: NULL — Historical agent could not identify a defensible reference class. ` +
+        `**Set outside_view_p_yes = null in your output.**` +
+        (t.notes_on_reference_class_limitations
+          ? ` (notes: ${t.notes_on_reference_class_limitations})`
+          : "");
+    } else {
+      const examples = (t.specific_examples ?? []).slice(0, 5).join("; ");
+      refClassBlock =
+        `\n- **reference_class**: ${t.reference_class}` +
+        `\n- **reference_class_size**: ${t.reference_class_size ?? "?"}` +
+        `\n- **resolved_at_or_above_rate**: ${t.resolved_at_or_above_rate ?? "?"}` +
+        `\n- **confidence_in_reference_class**: ${t.confidence_in_reference_class ?? "low"}` +
+        `\n- **specific_examples**: ${examples || "(none)"}` +
+        `\n- **notes_on_limitations**: ${t.notes_on_reference_class_limitations ?? ""}`;
+    }
+  }
   return `## Agent: ${t.agent.toUpperCase()}
 - **signal**: ${t.signal} @ confidence ${t.confidence}
 - **thesis**: ${t.thesis}
 - **reasoning**: ${t.reasoning}
-- **counter_arguments**: ${t.counter_arguments}
+- **counter_arguments**: ${t.counter_arguments}${refClassBlock}
 - **evidence**:
 ${evList}`;
 }

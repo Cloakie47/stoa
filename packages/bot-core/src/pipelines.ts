@@ -13,6 +13,7 @@
  * simulator; HTTP-proxied via /internal endpoints when called from the
  * Railway analyzer service).
  */
+import { formatEdgeSigned } from "@stoa/insight-engine";
 import type { FullTrace, JudgeTrace } from "@stoa/insight-engine";
 
 import type { BotCoreConfig } from "./config.js";
@@ -323,13 +324,21 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   const pYes = clamp01(j.model_probability_yes);
   const ciLow = clamp01(j.ci_low ?? Math.max(0, pYes - 0.15));
   const ciHigh = clamp01(j.ci_high ?? Math.min(1, pYes + 0.15));
-  const outsideView = clamp01(j.outside_view_p_yes ?? pYes);
-  const insideAdj = j.inside_view_adjustment ?? 0;
 
+  // Outside view + inside view are nullable — when the Historical agent
+  // could not anchor a reference class, the Judge sets both to null and the
+  // formatter hides those lines (replaced with a single "Reference class:
+  // insufficient" line below).
+  const hasOutsideView =
+    typeof j.outside_view_p_yes === "number" && Number.isFinite(j.outside_view_p_yes);
+  const outsideView = hasOutsideView ? clamp01(j.outside_view_p_yes!) : null;
+  const insideAdj = hasOutsideView ? (j.inside_view_adjustment ?? 0) : null;
+
+  // Edge sign: positive = YES side; we report whichever side the trade is on
+  // (or the raw signed edge_yes on PASS so the body matches the header text).
   const edgeSigned =
     j.signal === "NO" ? -Math.abs(j.edge_no) : j.edge_yes;
-  const edgeCents = Math.round(edgeSigned * 100);
-  const edgeStr = `${edgeSigned >= 0 ? "+" : ""}${edgeCents}¢`;
+  const edgeStr = formatEdgeSigned(edgeSigned);
 
   const verdictEmoji =
     j.signal === "YES" ? "📈" : j.signal === "NO" ? "📉" : "⏸";
@@ -341,18 +350,29 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   // ── Ensemble agreement line ──
   const ens = trace.judge_ensemble;
   const ensSize = ens?.runs.length ?? 1;
-  const ensAgreement = ens?.agreement ?? 1;
+  const verdictAg = ens?.verdict_agreement ?? 1;
+  const directionAg = ens?.directional_agreement ?? 1;
   const ensembleLine =
     ensSize > 1
-      ? `  Ensemble: ${ensSize}-model median, agreement ${(ensAgreement * 100).toFixed(0)}%`
+      ? `  Ensemble: ${ensSize}-model median, verdict ${(verdictAg * 100).toFixed(0)}%, direction ${(directionAg * 100).toFixed(0)}%`
       : `  Ensemble: 1 model (disabled or fallback)`;
 
   // ── Recommended action block ──
-  const sizePct = bankrollUsd > 0 ? (j.recommended_size_usdc / bankrollUsd) * 100 : 0;
+  // For PASS: replace the "PASS — same reason as header" redundancy with a
+  // forward-looking "Wait. Re-enter on the first of: <triggers>". For the
+  // BUY verdicts, keep the standard entry/size/stop block.
+  const sizePct =
+    bankrollUsd > 0 ? (j.recommended_size_usdc / bankrollUsd) * 100 : 0;
   const entryPrice = j.signal === "NO" ? no : yes;
   let actionBlock: string;
   if (j.signal === "PASS") {
-    actionBlock = `*Recommended action*\n  PASS — ${j.recommendation_reason ?? "no edge"}`;
+    const triggers = (j.reevaluation_triggers ?? [])
+      .slice(0, 3)
+      .map((t) => `    • ${truncate(t, 200)}`)
+      .join("\n");
+    actionBlock = triggers
+      ? `*Recommended action*\n  Wait. Re-enter on the first of:\n${triggers}`
+      : `*Recommended action*\n  Wait — re-run /analyze when material new information arrives.`;
   } else {
     actionBlock =
       `*Recommended action*\n` +
@@ -402,17 +422,30 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   const arcLink = `[${shortHash(txHash)}](https://testnet.arcscan.app/tx/${txHash})`;
   const ipfsLine = ipfsCid ? `IPFS:  \`${shortHash(ipfsCid)}\`` : `IPFS:  (no pin)`;
 
+  // Model-estimate block has two shapes depending on whether the Historical
+  // agent could anchor a reference class.
+  const modelEstimateLines = [
+    `*Model estimate*`,
+    `  P(YES) = ${pYes.toFixed(3)} [80% CI: ${ciLow.toFixed(2)} – ${ciHigh.toFixed(2)}]`,
+  ];
+  if (outsideView === null) {
+    modelEstimateLines.push(
+      `  Reference class: insufficient (Historical agent could not identify defensible reference class)`,
+    );
+  } else {
+    modelEstimateLines.push(
+      `  Outside view (base rate): ${outsideView.toFixed(3)}`,
+      `  Inside view adjustment: ${insideAdj! >= 0 ? "+" : ""}${insideAdj!.toFixed(3)}`,
+    );
+  }
+  modelEstimateLines.push(`  Edge: ${edgeStr}`, ensembleLine);
+
   return [
     verdictHeader,
     `Market: ${truncate(trace.market_question, 200)}`,
     `Current price: YES $${yes.toFixed(3)} / NO $${no.toFixed(3)}`,
     "",
-    `*Model estimate*`,
-    `  P(YES) = ${pYes.toFixed(3)} [80% CI: ${ciLow.toFixed(2)} – ${ciHigh.toFixed(2)}]`,
-    `  Outside view (base rate): ${outsideView.toFixed(3)}`,
-    `  Inside view adjustment: ${insideAdj >= 0 ? "+" : ""}${insideAdj.toFixed(3)}`,
-    `  Edge: ${edgeStr}`,
-    ensembleLine,
+    ...modelEstimateLines,
     "",
     actionBlock,
     "",

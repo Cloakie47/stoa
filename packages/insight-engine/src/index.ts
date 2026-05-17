@@ -50,6 +50,8 @@ export {
   computeJudgeRecommendation,
   MIN_EDGE_FOR_TRADE,
   DUST_SIZE_USD,
+  formatEdgeAbs,
+  formatEdgeSigned,
   type JudgeRecommendation,
 } from "./agents/judge.js";
 export {
@@ -81,6 +83,7 @@ export type {
   JudgeEnsembleRun,
   CalibrationDomain,
   CalibrationAdjustment,
+  ReferenceClassConfidence,
   ScenarioWeight,
   RiskBucket,
   FullTrace,

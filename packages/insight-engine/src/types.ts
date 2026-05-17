@@ -38,6 +38,8 @@ export interface TokenUsage {
   cache_creation_input_tokens: number;
 }
 
+export type ReferenceClassConfidence = "high" | "medium" | "low" | "none";
+
 export interface AgentTrace {
   agent: AgentName;
   market_url: string;
@@ -54,6 +56,23 @@ export interface AgentTrace {
   signal: Signal;
   /** Longer-form reasoning chain. */
   reasoning: string;
+
+  // ── Historical-agent-only fields (populated by runHistoricalAgent;
+  //     undefined on all other agent traces). The Judge inspects these
+  //     when deciding whether to anchor on an outside view. ────────────
+  /** Defined reference class for this question, or null when none is defensible. */
+  reference_class?: string | null;
+  /** Size N of the reference class (count of historical cases). */
+  reference_class_size?: number | null;
+  /** Fraction of the reference class that resolved at-or-above target. */
+  resolved_at_or_above_rate?: number | null;
+  /** ≥2 specific named examples backing the reference class, or [] when none. */
+  specific_examples?: string[];
+  /** Self-rated confidence in the reference class itself. */
+  confidence_in_reference_class?: ReferenceClassConfidence;
+  /** Free-text caveats — selection bias, recency, etc. */
+  notes_on_reference_class_limitations?: string;
+
   /** ISO 8601. */
   timestamp: string;
   /** Model ID used for the call (e.g. claude-haiku-4-5). */
@@ -131,10 +150,15 @@ export interface JudgeTrace extends AgentTrace {
   ci_low: number;
   /** 90th-percentile estimate of P(YES). */
   ci_high: number;
-  /** Historical base rate before any case-specific adjustment. */
-  outside_view_p_yes: number;
-  /** Signed: final_inside_view_p_yes - outside_view_p_yes. */
-  inside_view_adjustment: number;
+  /**
+   * Historical base rate before any case-specific adjustment, in [0,1].
+   * `null` when the Historical agent could not identify a defensible
+   * reference class — in that case `inside_view_adjustment` is also null
+   * and the Judge formed model_p_yes from inside-view reasoning alone.
+   */
+  outside_view_p_yes: number | null;
+  /** Signed: model_probability_yes - outside_view_p_yes. Null when no outside view. */
+  inside_view_adjustment: number | null;
   /** What happens if nothing changes between now and resolution. */
   status_quo_outcome: "YES" | "NO";
   no_scenario: ScenarioWeight;
@@ -170,7 +194,16 @@ export interface JudgeEnsemble {
   /** The individual runs that fed the aggregate. */
   runs: JudgeEnsembleRun[];
   /** Fraction of runs whose advisory verdict matched the majority, 0-1. */
-  agreement: number;
+  verdict_agreement: number;
+  /**
+   * Fraction of runs whose edge_bps sign matched the median edge_bps sign,
+   * treating |edge_bps| < 50 as "no direction". When all runs agree there
+   * is no direction, this is 1.0 — that's still informative (the bot is
+   * confident there's no edge), and pairs with verdict_agreement to
+   * distinguish "agree on PASS + agree on direction" from "agree on PASS
+   * + disagree on which side the edge would be."
+   */
+  directional_agreement: number;
   /** True when only 1 judge ran (ensembling disabled or fallback). */
   fallback_single_model: boolean;
   /** Sum of cost_usd across runs. */
