@@ -337,6 +337,7 @@ export const JUDGE_TRACE_JSON_SCHEMA = (() => {
               "sports_short",
               "sports_long",
               "weather_short",
+              "weather_long",
               "tech_demo",
               "politics",
               "crypto_price",

@@ -39,6 +39,7 @@ const VALID_CALIBRATION_DOMAINS: readonly CalibrationDomain[] = [
   "sports_short",
   "sports_long",
   "weather_short",
+  "weather_long",
   "tech_demo",
   "politics",
   "crypto_price",
@@ -111,9 +112,9 @@ You output JSON with all the following fields. (Schema validation will catch mis
   reevaluation_triggers — array of 3-5 specific strings (events or price levels).
   stability             — "stable" or "decays_<X>_bps_per_day" where X is your decay estimate.
   calibration_adjustment — {domain, reason}. Pick one domain:
-                            sports_short | sports_long | weather_short | tech_demo |
-                            politics | crypto_price | geopolitics | entertainment |
-                            long_horizon_any | other. The reason is one sentence.
+                            sports_short | sports_long | weather_short | weather_long |
+                            tech_demo | politics | crypto_price | geopolitics |
+                            entertainment | long_horizon_any | other. The reason is one sentence.
                             (A deterministic policy applies the actual numerical
                              adjustment in code; you just classify.)
   recommended_size_usdc — 0; sizing is computed by the orchestrator.

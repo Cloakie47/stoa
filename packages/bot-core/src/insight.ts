@@ -105,6 +105,8 @@ export async function runFullAnalysis(
     raw_model_p_yes: rawPYes,
     domain,
     hours_to_resolution: hours,
+    raw_ci_low: judge.ci_low,
+    raw_ci_high: judge.ci_high,
     judge_reason: judge.calibration_adjustment?.reason,
   });
 
@@ -119,6 +121,16 @@ export async function runFullAnalysis(
   // Mutate judge_trace + FullTrace in place so consumers (DB, IPFS, formatter)
   // all see the calibrated values. We keep the RAW prob in calibration_adjustment.
   judge.model_probability_yes = cal.adjusted_p_yes;
+  // CI bounds get the same slope transform — otherwise the point estimate can
+  // fall outside its own CI (the v1.0 Uzbekistan symptom: P(YES)=0.13 with
+  // 80% CI 0.00–0.01). When the gate fires, applyCalibration returns the raw
+  // bounds verbatim, so this is always consistent with the point estimate.
+  if (typeof cal.adjusted_ci_low === "number") {
+    judge.ci_low = Math.round(cal.adjusted_ci_low * 10_000) / 10_000;
+  }
+  if (typeof cal.adjusted_ci_high === "number") {
+    judge.ci_high = Math.round(cal.adjusted_ci_high * 10_000) / 10_000;
+  }
   judge.edge_yes = Math.round(rec.edge_yes * 10_000) / 10_000;
   judge.edge_no = Math.round(rec.edge_no * 10_000) / 10_000;
   judge.kelly_fraction = Math.round(rec.kelly_fraction * 10_000) / 10_000;

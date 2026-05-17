@@ -90,6 +90,7 @@ export type CalibrationDomain =
   | "sports_short"
   | "sports_long"
   | "weather_short"
+  | "weather_long"
   | "tech_demo"
   | "politics"
   | "crypto_price"

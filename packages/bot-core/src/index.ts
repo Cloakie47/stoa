@@ -54,6 +54,8 @@ export { sendTelegramMessage, newRequestId, type ParseMode } from "./telegram.js
 export {
   applyCalibration,
   CALIBRATION_POLICY_VERSION,
+  CALIBRATION_GATE_LOW,
+  CALIBRATION_GATE_HIGH,
   type ApplyCalibrationArgs,
   type ApplyCalibrationResult,
 } from "./calibration.js";
