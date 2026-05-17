@@ -28,8 +28,8 @@ STOA_TRACEPIN = "0x657355b621494C5F99253ce9A4c2cE8B9b488B7B"
 BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 
 # Stoa-routed payment amounts (USDC, 6 decimals)
-# 0.10 USDC = 100000; 0.20 USDC = 200000.
-STOA_FEE_ANALYZE_USDC = "100000"
+# 0.15 USDC = 150000; 0.20 USDC = 200000.
+STOA_FEE_ANALYZE_USDC = "150000"
 STOA_FEE_CONFIRM_USDC = "200000"
 
 # ── Secrets (set via wrangler secret put NAME) ──────────────────────────────

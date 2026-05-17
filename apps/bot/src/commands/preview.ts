@@ -41,7 +41,7 @@ export async function handlePreview(args: PreviewArgs): Promise<PreviewResult> {
     `${summary.one_liner}\n\n` +
     `${tag}\n\n` +
     `_Want a multi-agent analysis (News / Sentiment / Historical / Market Structure + Judge) with a Kelly-sized recommendation and an on-chain trace?_\n` +
-    `Run \`/analyze ${marketUrl}\` — $0.10 USDC from your Arc balance.`;
+    `Run \`/analyze ${marketUrl}\` — $0.15 USDC from your Arc balance.`;
 
   return { message, signal_guess: summary.signal_guess };
 }

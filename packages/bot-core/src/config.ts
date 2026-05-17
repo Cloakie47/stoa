@@ -24,7 +24,7 @@ export interface BotCoreConfig {
   BASE_USDC: string;
 
   // Fee amounts in USDC base units (6 decimals)
-  STOA_FEE_ANALYZE_USDC: string; // "100000" = $0.10
+  STOA_FEE_ANALYZE_USDC: string; // "150000" = $0.15
   STOA_FEE_CONFIRM_USDC: string; // "200000" = $0.20
 
   // Secrets

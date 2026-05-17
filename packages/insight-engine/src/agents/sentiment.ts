@@ -17,6 +17,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 
 import {
   MODEL_HAIKU,
+  normalizeEvidence,
   runAgent,
   type RunAgentResult,
 } from "../claude.js";
@@ -53,9 +54,12 @@ Same Trading-R1-style trace as the other agents:
 {
   "thesis":            "1-3 sentence claim about what the social/community sentiment is and which direction it leans",
   "evidence": [
-    { "source": "X @username (15K followers)", "quote": "...", "url": "https://x.com/...", "timestamp": "..." },
-    { "source": "Farcaster @handle",           "quote": "...", "url": "...", "timestamp": "..." },
-    { "source": "Reddit r/subreddit",           "quote": "...", "url": "...", "timestamp": "..." },
+    {
+      "claim": "<one-sentence factual observation, e.g. 'X @userAlpha (320K followers) called the runoff scenario explicitly'>",
+      "source_url": "https://x.com/userAlpha/status/...",
+      "source_name": "X @userAlpha (320K)",
+      "confidence": "high" | "medium" | "low"
+    },
     ...  // 3-8 items
   ],
   "counter_arguments": "the strongest contrary sentiment you saw. If everyone is one-sided, flag the unanimity itself — it might mean the contrarian view isn't being heard",
@@ -66,6 +70,12 @@ Same Trading-R1-style trace as the other agents:
 \`\`\`
 
 Output the JSON object as the FINAL text block of your response.
+
+# CITATION DISCIPLINE — HARD RULE
+
+If you cite a numeric fact (follower count, like count, post count) you MUST cite the source_url. If a tool returns a post without a usable permalink, DROP that item — do not list a post without a URL. The schema requires \`claim\`, \`source_url\`, and \`source_name\` on every evidence entry.
+
+Anonymized aggregate observations ("most replies under the top post leaned bearish") are allowed with \`source_url: null\` ONLY when they reference items already individually cited in your list. Do not invent permalinks.
 
 # HOW TO THINK ABOUT SENTIMENT
 
@@ -237,7 +247,7 @@ export async function runSentimentAgent(
     market_url: context.url,
     market_question: context.question,
     thesis: result.parsed.thesis as string,
-    evidence: result.parsed.evidence as AgentTrace["evidence"],
+    evidence: normalizeEvidence(result.parsed.evidence),
     counter_arguments: result.parsed.counter_arguments as string,
     confidence: result.parsed.confidence as number,
     signal: result.parsed.signal as AgentTrace["signal"],

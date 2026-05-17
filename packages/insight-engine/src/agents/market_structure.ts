@@ -20,6 +20,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 
 import {
   MODEL_HAIKU,
+  normalizeEvidence,
   runAgent,
   type RunAgentResult,
 } from "../claude.js";
@@ -65,8 +66,18 @@ The response is compact and signal-dense — no raw price arrays. Call it for bo
 {
   "thesis":            "1-3 sentence claim about what the market structure is signaling",
   "evidence": [
-    { "source": "Polymarket orderbook (YES)", "quote": "Best bid 0.42, best ask 0.46, 4¢ spread; depth 800 USDC top-5 bids, 1.2K USDC top-5 asks" },
-    { "source": "Polymarket 1d price history", "quote": "Price rose from 0.31 → 0.44 over the past 18 hours" },
+    {
+      "claim": "Best bid 0.42, best ask 0.46, 4¢ spread; top-5 bid depth 800 USDC, top-5 ask depth 1.2K USDC.",
+      "source_url": "<the Polymarket market URL you were given as context>",
+      "source_name": "Polymarket orderbook",
+      "confidence": "high"
+    },
+    {
+      "claim": "Price rose from 0.31 → 0.44 over the past 18 hours.",
+      "source_url": "<same Polymarket market URL>",
+      "source_name": "Polymarket price history",
+      "confidence": "high"
+    },
     ...  // 3-6 items
   ],
   "counter_arguments": "the strongest structural argument AGAINST your thesis — e.g. 'low total volume means the price moves are unreliable signal'",
@@ -77,6 +88,15 @@ The response is compact and signal-dense — no raw price arrays. Call it for bo
 \`\`\`
 
 Output the JSON object as the FINAL text block of your response.
+
+# CITATION DISCIPLINE — HARD RULE
+
+Every numeric claim (price, depth, volume, percent change) needs a source. Since your data comes from Polymarket's own CLOB and not a third-party publisher, the canonical \`source_url\` is THE MARKET URL itself (passed in the user message), and \`source_name\` is one of:
+  - "Polymarket orderbook"  — for bid/ask/spread/depth facts
+  - "Polymarket price history" — for trajectory / pct-change facts
+  - "Polymarket flow / trades" — for trade-count, large-trade, 24h volume facts
+
+Do not invent third-party URLs for orderbook data. The market URL + the source_name above is sufficient citation.
 
 # WHAT TO LOOK FOR
 
@@ -236,7 +256,7 @@ export async function runMarketStructureAgent(
     market_url: context.url,
     market_question: context.question,
     thesis: result.parsed.thesis as string,
-    evidence: result.parsed.evidence as AgentTrace["evidence"],
+    evidence: normalizeEvidence(result.parsed.evidence),
     counter_arguments: result.parsed.counter_arguments as string,
     confidence: result.parsed.confidence as number,
     signal: result.parsed.signal as AgentTrace["signal"],
@@ -267,7 +287,10 @@ Outcomes: ${context.outcomes.join(", ")}
 ${priceLine}
 ${volLine}
 
+Market URL (use this verbatim as \`source_url\` for orderbook / price-history / flow facts):
+${context.url}
+
 # Task
 
-Call fetch_market_structure for both "yes" and "no" sides. Analyze the orderbook depth, spread, and recent price trajectory. Then emit your AgentTrace JSON.`;
+Call fetch_market_structure for both "yes" and "no" sides. Analyze the orderbook depth, spread, and recent price trajectory. Then emit your AgentTrace JSON. Every evidence item should set \`source_url\` to the market URL above and \`source_name\` to one of "Polymarket orderbook" / "Polymarket price history" / "Polymarket flow / trades".`;
 }

@@ -61,7 +61,7 @@ export interface AnalyzePipelineResult {
  *   1. Load wallet + check Arc USDC balance
  *   2. Read Base USDC balance for Kelly sizing bankroll
  *   3. Run insight-engine multi-agent analysis
- *   4. Pay $0.10 Stoa fee atomically (split + trace pin)
+ *   4. Pay $0.15 Stoa fee atomically (split + trace pin)
  *   5. Persist prepared order + trace pin row
  *   6. DM the user with the Kelly-sized recommendation + confirm button text
  */
@@ -176,7 +176,7 @@ export async function runAnalyzePipeline(
     await sendTelegramMessage(
       cfg.TELEGRAM_BOT_TOKEN,
       chatId,
-      `❌ /analyze failed (request \`${requestId}\`): ${msg}\n\nTry again — if this keeps happening, check /balance and confirm you have ≥ $0.10 USDC on Arc Testnet.`,
+      `❌ /analyze failed (request \`${requestId}\`): ${msg}\n\nTry again — if this keeps happening, check /balance and confirm you have ≥ $0.15 USDC on Arc Testnet.`,
     );
     return null;
   }
@@ -383,9 +383,26 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   }
 
   // ── Evidence ──
+  // Render each evidence item as a Markdown hyperlink so tapping a bullet
+  // opens the source URL in Telegram. We stay on legacy Markdown parse mode
+  // (the rest of the message uses *bold* / `code` / [link](url)), so
+  // escape the bracket chars that would break legacy-Markdown link parsing,
+  // plus the chars that would unintentionally trigger formatting inside the
+  // link text. URLs are left raw — legacy MD accepts them as-is.
   const evidenceLines =
-    j.evidence.slice(0, 4).map((e, i) => `  [${i + 1}] ${truncate(e.quote, 220)}`).join("\n") ||
-    "  (no evidence emitted)";
+    j.evidence
+      .slice(0, 4)
+      .map((e, i) => {
+        const claim = truncate(e.claim ?? "(no claim)", 220);
+        const claimEsc = escapeMarkdownLinkText(claim);
+        const name = escapeMarkdownLinkText(e.source_name ?? "unverified");
+        const url = e.source_url;
+        if (url) {
+          return `  [${i + 1}] [${claimEsc}](${url}) — ${name}`;
+        }
+        return `  [${i + 1}] ${claimEsc} — ${name || "unverified"}`;
+      })
+      .join("\n") || "  (no evidence emitted)";
 
   // ── Risk decomposition ──
   const riskLines =
@@ -467,8 +484,23 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
       ? `_No trade to confirm. Run /analyze on a different market._`
       : `*To execute:* \`/confirm ${orderId}\`\n($0.20 execution fee + the trade itself on Limitless)`,
     "",
-    `_Request \`${requestId}\` — $0.10 charged, split 70/20/10 atomic on Arc._`,
+    `_Request \`${requestId}\` — $0.15 charged, split 70/20/10 atomic on Arc._`,
   ].join("\n");
+}
+
+/**
+ * Conservative escape for text destined to live inside legacy Markdown
+ * `[text](url)` link bodies. Escapes the chars that would break the link
+ * structure (`[`, `]`) or accidentally trigger inline formatting (`_`,
+ * `*`, backslash, backtick). URL contents are left untouched — the
+ * formatter never injects user-controlled URLs anywhere but inside the
+ * `(...)` of the link, where these chars don't need escaping. Markdown V2
+ * users wanting full escape coverage should switch parse_mode globally;
+ * we keep legacy mode so the rest of the message (period-separated prose,
+ * parens around fractions, etc.) renders without backslash noise.
+ */
+function escapeMarkdownLinkText(s: string): string {
+  return s.replace(/[\\`*_[\]]/g, (m) => `\\${m}`);
 }
 
 function clamp01(n: number | undefined): number {

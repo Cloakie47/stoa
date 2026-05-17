@@ -52,6 +52,64 @@ export function estimateCostUsd(model: ModelId, usage: TokenUsage): number {
   );
 }
 
+/**
+ * Coerce a parsed `evidence` array into the canonical EvidenceItem shape.
+ * Tolerates the legacy {source, quote, url} shape so traces pinned before
+ * the schema rev still load. Drops items that have neither claim nor quote.
+ */
+export function normalizeEvidence(
+  raw: unknown,
+): import("./types.js").EvidenceItem[] {
+  if (!Array.isArray(raw)) return [];
+  const items: import("./types.js").EvidenceItem[] = [];
+  for (const r of raw) {
+    if (typeof r !== "object" || r === null) continue;
+    const obj = r as Record<string, unknown>;
+    const claim =
+      typeof obj.claim === "string"
+        ? obj.claim
+        : typeof obj.quote === "string"
+          ? obj.quote
+          : null;
+    if (!claim) continue;
+    const source_url =
+      typeof obj.source_url === "string"
+        ? obj.source_url
+        : typeof obj.url === "string"
+          ? obj.url
+          : null;
+    const source_name =
+      typeof obj.source_name === "string"
+        ? obj.source_name
+        : typeof obj.source === "string"
+          ? obj.source
+          : "unverified";
+    const item: import("./types.js").EvidenceItem = {
+      claim,
+      source_url,
+      source_name,
+    };
+    if (
+      obj.confidence === "high" ||
+      obj.confidence === "medium" ||
+      obj.confidence === "low"
+    ) {
+      item.confidence = obj.confidence;
+    }
+    if (
+      obj.specialist === "News" ||
+      obj.specialist === "Sentiment" ||
+      obj.specialist === "Historical" ||
+      obj.specialist === "MarketStructure"
+    ) {
+      item.specialist = obj.specialist;
+    }
+    if (typeof obj.timestamp === "string") item.timestamp = obj.timestamp;
+    items.push(item);
+  }
+  return items;
+}
+
 export function emptyUsage(): TokenUsage {
   return {
     input_tokens: 0,
@@ -99,16 +157,33 @@ export const AGENT_TRACE_JSON_SCHEMA = {
     evidence: {
       type: "array" as const,
       description:
-        "Supporting evidence — sources, short quotes, and URLs where possible. Aim for 3-8 items.",
+        "Cited findings — one factual statement per item, each paired with the source URL it came from. Aim for 3-8 items. If you cannot ground a claim in a defensible source, OMIT it — do not fabricate URLs.",
       items: {
         type: "object" as const,
         properties: {
-          source: { type: "string" as const },
-          quote: { type: "string" as const },
-          url: { type: "string" as const },
+          claim: {
+            type: "string" as const,
+            description: "One-sentence factual statement (no opinion, no hedging).",
+          },
+          source_url: {
+            type: ["string", "null"] as const,
+            description:
+              "URL of the source. NULL when the source has no canonical URL (raw orderbook math, etc.); otherwise required.",
+          },
+          source_name: {
+            type: "string" as const,
+            description:
+              "Publication / domain / channel name, e.g. 'Reuters', 'Bogotá Post', 'Polymarket orderbook'.",
+          },
+          confidence: {
+            type: "string" as const,
+            enum: ["high", "medium", "low"] as const,
+            description:
+              "Self-rated confidence in THIS claim (separate from the agent's overall confidence).",
+          },
           timestamp: { type: "string" as const },
         },
-        required: ["source", "quote"],
+        required: ["claim", "source_url", "source_name"],
         additionalProperties: false,
       },
     },
@@ -240,10 +315,40 @@ export const JUDGE_TRACE_JSON_SCHEMA = (() => {
     required: ["scenario", "probability"],
     additionalProperties: false,
   };
+  // Judge-side evidence items add a `specialist` tag so consumers can see
+  // which agent surfaced each citation. Otherwise the shape mirrors the
+  // specialist evidence items.
+  const judgeEvidenceItem = {
+    type: "object" as const,
+    properties: {
+      claim: { type: "string" as const },
+      source_url: { type: ["string", "null"] as const },
+      source_name: { type: "string" as const },
+      confidence: {
+        type: "string" as const,
+        enum: ["high", "medium", "low"] as const,
+      },
+      specialist: {
+        type: "string" as const,
+        enum: ["News", "Sentiment", "Historical", "MarketStructure"] as const,
+        description:
+          "Which specialist agent originally surfaced this finding. Preserve verbatim from the specialist trace.",
+      },
+      timestamp: { type: "string" as const },
+    },
+    required: ["claim", "source_url", "source_name"],
+    additionalProperties: false,
+  };
   return {
     type: "object" as const,
     properties: {
       ...AGENT_TRACE_JSON_SCHEMA.properties,
+      evidence: {
+        type: "array" as const,
+        description:
+          "Cited findings preserved (and synthesized) from the specialist traces. Each item MUST keep its original source_url and source_name; do not strip citations during summarization. Include the `specialist` field naming which agent the finding came from. Aim for 4-8 items spanning multiple specialists.",
+        items: judgeEvidenceItem,
+      },
       disagreement_analysis: {
         type: "string" as const,
         description:
@@ -491,8 +596,19 @@ export interface RunAgentParams {
   /**
    * Enable Sonnet's adaptive thinking. Default false. Pass true for
    * historical + judge agents.
+   *
+   * Note: Anthropic's thinking modes force temperature=1 and reject any
+   * explicit temperature override. {@link runAgent} therefore SUPPRESSES
+   * thinking when {@link temperature} is set, regardless of this flag.
    */
   adaptiveThinking?: boolean;
+  /**
+   * Override the sampling temperature. Used by the Judge ensemble to run
+   * two Sonnet copies at temp=0 and temp=0.7 for diversity. When omitted,
+   * the API default applies (1.0 with thinking; otherwise the model's
+   * built-in default).
+   */
+  temperature?: number;
   /**
    * Max tool-use iterations before bailing. Default 8 — enough for a
    * search-summarize-cite loop without runaway tool calls.
@@ -529,8 +645,13 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
     outputSchema = AGENT_TRACE_JSON_SCHEMA,
     maxTokens = 4000,
     adaptiveThinking = false,
+    temperature,
     maxToolIterations = 8,
   } = params;
+  // Thinking and explicit temperature are mutually exclusive in the Anthropic
+  // API. When the caller passes a temperature, drop thinking — the ensemble
+  // uses temperature as its diversity lever instead of thinking.
+  const useThinking = adaptiveThinking && temperature === undefined;
 
   const client = getClient();
 
@@ -583,8 +704,11 @@ export async function runAgent(params: RunAgentParams): Promise<RunAgentResult> 
       request.tools = tools;
     }
 
-    if (adaptiveThinking) {
+    if (useThinking) {
       request.thinking = { type: "adaptive" };
+    }
+    if (temperature !== undefined) {
+      request.temperature = temperature;
     }
 
     let response: Anthropic.Message;

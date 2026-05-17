@@ -1,18 +1,29 @@
 /**
- * Judge agent — multi-model ensemble of Haiku 4.5, Sonnet 4.6, and Opus 4.7.
+ * Judge agent — multi-model ensemble of Sonnet 4.6 (×2 at different
+ * temperatures) and Haiku 4.5. Opus was dropped 2026-05-17 because the cost
+ * was disproportionate to the marginal Brier improvement — three smaller
+ * models at temperature diversity beats one Opus + two smaller in our
+ * eval set, and total /analyze cost stays under $0.15.
  *
  * Receives the four specialist AgentTraces, reasons through the Metaculus
  * forecasting template (outside view → status quo → scenarios → triggers),
  * and emits a JudgeTrace with a calibrated point estimate + 80% CI.
  *
- * The ensemble runs three models in parallel via Promise.all. Aggregation:
+ * The ensemble runs three model variants in parallel via Promise.allSettled.
+ * Aggregation:
  *   - model_p_yes  = median across runs
  *   - ci_low       = min ci_low across runs
  *   - ci_high      = max ci_high across runs
  *   - verdict      = majority vote; PASS on tie
  *   - other fields = taken verbatim from the median run
  *
- * If ensembling fails for ≥ 2 models, falls back to whatever ran successfully
+ * Note that aggregation is one-vote-per-RUN, not per model, so the two
+ * Sonnet runs do not double-weight Sonnet — the diversity is the point.
+ *
+ * Adaptive thinking is incompatible with explicit temperature; the
+ * temperature-driven Sonnet runs and the Haiku run all skip thinking.
+ *
+ * If ensembling fails for ≥ 2 runs, falls back to whatever ran successfully
  * (or throws when zero ran). Caller can also disable ensembling via env.
  */
 
@@ -22,9 +33,11 @@ import {
   MODEL_OPUS,
   MODEL_SONNET,
   type ModelId,
+  normalizeEvidence,
   runAgent,
   type RunAgentResult,
 } from "../claude.js";
+void MODEL_OPUS; // re-exported from index.ts for back-compat; not used here.
 import type {
   AgentTrace,
   CalibrationDomain,
@@ -91,7 +104,7 @@ Before answering you MUST work through these in this order:
 You output JSON with all the following fields. (Schema validation will catch missing fields — emit them all.)
 
   thesis                — 1-3 sentence claim, the aggregate view.
-  evidence              — array of {source, quote} drawn from the four traces (not from your training data).
+  evidence              — array of {claim, source_url, source_name, specialist, confidence} drawn from the four traces (not from your training data). PRESERVE source_url and source_name verbatim from the specialist trace you took the finding from. Do NOT strip citations during summarization. Set specialist to "News" | "Sentiment" | "Historical" | "MarketStructure" — whichever agent surfaced the claim. Include 4-8 items spanning multiple specialists.
   counter_arguments     — the strongest case AGAINST your thesis from the traces.
   confidence            — 0-100, your META-uncertainty about model_probability_yes.
   signal                — "YES" | "NO" | "PASS"; advisory, orchestrator overrides.
@@ -183,8 +196,28 @@ export interface JudgeInput {
   agentTraces: AgentTrace[];
 }
 
-/** Models that participate in the default ensemble. Ordered by reasoning depth. */
-export const ENSEMBLE_MODELS: ModelId[] = [MODEL_OPUS, MODEL_SONNET, MODEL_HAIKU];
+/**
+ * One ensemble entry. `label` is the model+temperature display string used
+ * in logs and on the JudgeEnsembleRun.model field — two same-model entries
+ * must have distinct labels so the ensemble code can keep them apart.
+ */
+export interface EnsembleVariant {
+  model: ModelId;
+  /** Sampling temperature. Omit to use the API default. */
+  temperature?: number;
+  /** Display label, e.g. "claude-sonnet-4-6@t0.0". */
+  label: string;
+}
+
+/** Default ensemble: two Sonnet runs at diverse temperatures + one Haiku run. */
+export const ENSEMBLE_VARIANTS: EnsembleVariant[] = [
+  { model: MODEL_SONNET, temperature: 0.0, label: `${MODEL_SONNET}@t0.0` },
+  { model: MODEL_SONNET, temperature: 0.7, label: `${MODEL_SONNET}@t0.7` },
+  { model: MODEL_HAIKU, label: MODEL_HAIKU },
+];
+
+/** Back-compat: callers that only need the model IDs (no longer the ensemble source of truth). */
+export const ENSEMBLE_MODELS: ModelId[] = ENSEMBLE_VARIANTS.map((v) => v.model);
 
 /**
  * Single-model Judge call. Builds the JudgeTrace with all Metaculus-template
@@ -193,16 +226,22 @@ export const ENSEMBLE_MODELS: ModelId[] = [MODEL_OPUS, MODEL_SONNET, MODEL_HAIKU
  *
  * `model_p_yes` here is the *raw* probability the model emitted — calibration
  * policy is applied LATER, by the orchestrator (bot-core/calibration.ts).
+ *
+ * When `temperature` is supplied, adaptive thinking is suppressed (the
+ * Anthropic API rejects the combination). The temperature itself becomes
+ * the diversity lever for ensembling.
  */
 export async function runJudgeAgent(
   input: JudgeInput,
   model: ModelId = MODEL_SONNET,
+  temperature?: number,
 ): Promise<{ trace: JudgeTrace; cost_usd: number }> {
   const userMessage = renderUserMessage(input);
   // Haiku 4.5 returns 400 "adaptive thinking is not supported on this model".
-  // Opus 4.7 and Sonnet 4.6 both accept it. Branch explicitly so we don't
-  // silently lose a model from the ensemble.
-  const adaptiveThinking = model !== MODEL_HAIKU;
+  // Sonnet 4.6 accepts thinking only when temperature is NOT set. So both
+  // ensemble levers (model and temperature) get tested in this single
+  // condition.
+  const adaptiveThinking = model !== MODEL_HAIKU && temperature === undefined;
   const result: RunAgentResult = await runAgent({
     model,
     systemPrompt: SYSTEM_PROMPT,
@@ -210,8 +249,10 @@ export async function runJudgeAgent(
     outputSchema: JUDGE_TRACE_JSON_SCHEMA,
     // Adaptive thinking + expanded edge-reasoning prompt can burn through
     // 8k; 16k leaves headroom for the JSON emit after the thinking phase.
-    maxTokens: 16000,
+    // When thinking is off (temperature runs), 8k is plenty.
+    maxTokens: adaptiveThinking ? 16000 : 8000,
     adaptiveThinking,
+    temperature,
   });
 
   const p = result.parsed;
@@ -258,7 +299,7 @@ export async function runJudgeAgent(
     market_url: input.context.url,
     market_question: input.context.question,
     thesis: (p.thesis as string) ?? "",
-    evidence: (p.evidence as JudgeTrace["evidence"]) ?? [],
+    evidence: normalizeEvidence(p.evidence),
     counter_arguments: (p.counter_arguments as string) ?? "",
     confidence: (p.confidence as number) ?? 50,
     signal: rec.signal,
@@ -330,26 +371,29 @@ function round4(n: number): number {
  */
 export async function runJudgeEnsemble(
   input: JudgeInput,
-  opts: { models?: ModelId[]; disableEnsemble?: boolean } = {},
+  opts: { variants?: EnsembleVariant[]; disableEnsemble?: boolean } = {},
 ): Promise<JudgeEnsemble> {
   const envDisabled = process.env.STOA_DISABLE_ENSEMBLE === "1";
   const disabled = opts.disableEnsemble ?? envDisabled;
-  const models = disabled
-    ? [opts.models?.[0] ?? MODEL_SONNET]
-    : (opts.models ?? ENSEMBLE_MODELS);
+  const variants = disabled
+    ? [opts.variants?.[0] ?? ENSEMBLE_VARIANTS[0]!]
+    : (opts.variants ?? ENSEMBLE_VARIANTS);
 
   const settled = await Promise.allSettled(
-    models.map((m) => runJudgeAgent(input, m)),
+    variants.map((v) => runJudgeAgent(input, v.model, v.temperature)),
   );
 
   const runs: JudgeEnsembleRun[] = [];
   for (const [i, r] of settled.entries()) {
-    const m = models[i]!;
+    const v = variants[i]!;
     if (r.status === "fulfilled") {
-      runs.push({ model: m, trace: r.value.trace, cost_usd: r.value.cost_usd });
+      // Overwrite trace.model with the variant LABEL so two same-model runs
+      // remain distinguishable in pinned traces + downstream displays.
+      const trace = { ...r.value.trace, model: v.label };
+      runs.push({ model: v.label, trace, cost_usd: r.value.cost_usd });
     } else {
       console.warn(
-        `[judge-ensemble] ${m} run failed: ${(r.reason as Error)?.message ?? r.reason}`,
+        `[judge-ensemble] ${v.label} run failed: ${(r.reason as Error)?.message ?? r.reason}`,
       );
     }
   }
@@ -363,7 +407,7 @@ export async function runJudgeEnsemble(
   const totalCost = runs.reduce((s, r) => s + r.cost_usd, 0);
 
   console.log(
-    `[judge-ensemble] models=[${models.join(",")}] succeeded=${runs.length}/${models.length} ` +
+    `[judge-ensemble] variants=[${variants.map((v) => v.label).join(",")}] succeeded=${runs.length}/${variants.length} ` +
       `verdict_agreement=${(verdictAgreement * 100).toFixed(0)}% ` +
       `directional_agreement=${(directionalAgreement * 100).toFixed(0)}% ` +
       `aggregate.p_yes=${aggregate.model_probability_yes.toFixed(4)} ` +
@@ -513,10 +557,20 @@ export interface JudgeRecommendation {
   reason: string;
 }
 
-/** Minimum absolute edge (in probability units) to consider a trade.
+/** Default minimum absolute edge (in probability units) to consider a trade.
  *  4¢ — below this the market is essentially in agreement with the model
- *  and quarter-Kelly sizing is mostly noise. */
+ *  and quarter-Kelly sizing is mostly noise. Override at runtime via
+ *  `STOA_EDGE_THRESHOLD_BPS` (basis points). Keep at 400 in production;
+ *  Railway sets it to 200 (2¢) for the demo so moderate-edge picks like
+ *  Cepeda @ $0.443 vs model $0.46 surface a BUY_YES recommendation. */
 export const MIN_EDGE_FOR_TRADE = 0.04;
+
+function getEdgeFloor(): number {
+  const raw =
+    typeof process !== "undefined" ? process.env?.STOA_EDGE_THRESHOLD_BPS : undefined;
+  const bps = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(bps) && bps > 0 ? bps / 10_000 : MIN_EDGE_FOR_TRADE;
+}
 
 /** Below this dollar size we PASS — the trade isn't worth the round-trip
  *  fee. Lowered from $1 to $0.05 so small balances with real edge still
@@ -578,14 +632,15 @@ export function computeJudgeRecommendation(args: {
   const edge_no = -edge_yes;
   const absEdge = Math.abs(edge_yes);
 
-  if (absEdge < MIN_EDGE_FOR_TRADE) {
+  const edgeFloor = getEdgeFloor();
+  if (absEdge < edgeFloor) {
     return {
       signal: "PASS",
       size_usdc: 0,
       edge_yes,
       edge_no,
       kelly_fraction: 0,
-      reason: `Edge ${formatEdgeAbs(absEdge)} is below the ${(MIN_EDGE_FOR_TRADE * 100).toFixed(0)}¢ minimum. Model and market essentially agree — wait for better odds.`,
+      reason: `Edge ${formatEdgeAbs(absEdge)} is below the ${(edgeFloor * 100).toFixed(0)}¢ minimum. Model and market essentially agree — wait for better odds.`,
     };
   }
 
@@ -692,9 +747,16 @@ Emit your JudgeTrace JSON as the final text block.`;
 }
 
 function renderTraceForJudge(t: AgentTrace): string {
+  // Surface URL + source name verbatim. The Judge MUST copy these into its
+  // own evidence array — that's how on-chain auditability survives.
   const evList = t.evidence
     .slice(0, 8)
-    .map((e, i) => `    ${i + 1}. (${e.source}) ${e.quote.slice(0, 280)}`)
+    .map((e, i) => {
+      const claim = (e.claim ?? "").slice(0, 280);
+      const url = e.source_url ?? "(no URL)";
+      const name = e.source_name ?? "unverified";
+      return `    ${i + 1}. ${claim}\n       source_url: ${url}\n       source_name: ${name}`;
+    })
     .join("\n");
   let refClassBlock = "";
   if (t.agent === "historical") {

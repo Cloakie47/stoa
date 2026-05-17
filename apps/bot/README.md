@@ -62,7 +62,7 @@ The split exists because Cloudflare Workers' `waitUntil` caps at 30 seconds even
 |---|---|---|
 | `/start` | free | Generate viem EOA for the user, encrypt PK, store in D1, return funding address + disclosure |
 | `/preview <url>` | free | Single-LLM-call summary; no Stoa fee, no trace pin |
-| `/analyze <url>` | $0.10 | Full multi-agent analysis + trace pin. Pre-charges via StoaSettler |
+| `/analyze <url>` | $0.15 | Full multi-agent analysis + trace pin. Pre-charges via StoaSettler |
 | `/confirm <orderId>` | $0.20 | Submits the trade to Limitless. Pre-charges via StoaSettler. Limitless leg is MOCKED in v0. |
 | `/balance` | free | USDC on Base (real) + open positions (D1) |
 | `/positions` | free | Open Limitless orders (D1) |

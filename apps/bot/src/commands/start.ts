@@ -42,7 +42,7 @@ What this means:
 • We can move your funds. We won't, but the trust model is custodial.
 • Use small amounts. This is a hackathon bot, not a production exchange.
 • /withdraw <address> <amount> works any time — your funds are not locked.
-• Stoa fees ($0.10 /analyze + $0.20 /confirm) are *non-refundable* in v0.
+• Stoa fees ($0.15 /analyze + $0.20 /confirm) are *non-refundable* in v0.
 
 By using /analyze or /confirm you accept the above.
 `.trim();

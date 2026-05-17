@@ -23,6 +23,7 @@
 import {
   HISTORICAL_TRACE_JSON_SCHEMA,
   MODEL_SONNET,
+  normalizeEvidence,
   runAgent,
   type RunAgentResult,
 } from "../claude.js";
@@ -72,7 +73,7 @@ If reference_class_size < 5, set confidence_in_reference_class to "low" or "none
 # OUTPUT FORMAT — ALL FIELDS REQUIRED
 
   thesis                              — 1-3 sentences, grounded in the reference class.
-  evidence                            — array of {source, quote} — the historical events themselves are your evidence.
+  evidence                            — array of {claim, source_url, source_name, confidence} — the historical events themselves are your evidence. source_url MAY be null when the case is canonical training-data knowledge with no clean URL; in that case set source_name to the canonical reference (e.g. "AI Day 2 livestream archive", "GXO 2024 Q3 earnings call") rather than fabricating a link.
   counter_arguments                   — dis-analogues; structural differences between THIS case and the reference class.
   confidence                          — 0-100. CAPPED at 60 when reference_class_size < 5; CAPPED at 40 when reference_class = null.
   signal                              — YES | NO | PASS. Use PASS when no defensible reference class exists.
@@ -178,7 +179,7 @@ export async function runHistoricalAgent(
     market_url: context.url,
     market_question: context.question,
     thesis: (p.thesis as string) ?? "",
-    evidence: (p.evidence as AgentTrace["evidence"]) ?? [],
+    evidence: normalizeEvidence(p.evidence),
     counter_arguments: (p.counter_arguments as string) ?? "",
     confidence: (p.confidence as number) ?? 0,
     signal: (p.signal as AgentTrace["signal"]) ?? "PASS",

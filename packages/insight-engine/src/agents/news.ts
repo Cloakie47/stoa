@@ -17,6 +17,7 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import {
   MODEL_HAIKU,
+  normalizeEvidence,
   runAgent,
   type RunAgentResult,
 } from "../claude.js";
@@ -43,9 +44,13 @@ You MUST emit a JSON object matching this schema:
 {
   "thesis":            "1-3 sentence core claim — your view on YES vs NO based on the news",
   "evidence": [
-    { "source": "Reuters",    "quote": "...", "url": "https://...", "timestamp": "2026-05-14T..." },
-    { "source": "BBC",        "quote": "...", "url": "...", "timestamp": "..." },
-    ...  // aim for 3-8 items, prefer first-hand and well-known outlets
+    {
+      "claim": "<one-sentence factual statement, e.g. 'Cepeda is polling at 44.3% in the latest Invamer survey'>",
+      "source_url": "https://...",
+      "source_name": "Reuters",
+      "confidence": "high" | "medium" | "low"
+    },
+    ...  // 3-8 items, prefer first-hand sources
   ],
   "counter_arguments": "what credible sources say AGAINST your thesis. REQUIRED — if you can't find any, say so explicitly and lower your confidence",
   "confidence":        0-100 integer,
@@ -56,10 +61,16 @@ You MUST emit a JSON object matching this schema:
 
 Output the JSON object as the FINAL text block of your response, after any tool use. Do not wrap it in markdown fences; just emit the bare JSON.
 
+# CITATION DISCIPLINE — HARD RULE
+
+If you state a numeric fact you MUST cite the source URL. If you cannot find a URL for a claim, DO NOT STATE THE FACT. Instead, drop the item entirely or say in your reasoning "no defensible source available for X". This rule exists because the trace is pinned on-chain and downstream consumers click these links — fabricated URLs are auditable fraud.
+
+The schema requires \`claim\`, \`source_url\`, and \`source_name\` on every evidence item. \`source_url\` can be null only when the item is an aggregate observation across multiple cited sources you already included separately, and you make that explicit ("aggregated from items 1-3 above").
+
 # WHAT EACH FIELD MEANS
 
 - **thesis**: Your single-sentence claim. Bad: "It's hard to say." Good: "Recent reporting strongly suggests the deal will close before the deadline because both regulators have signaled approval."
-- **evidence**: Direct quotes (or close paraphrases) from sources you actually retrieved via web_search. Always include the URL. Never fabricate quotes. If a quote is paraphrased, flag it with "(paraphrased)" in the source field.
+- **evidence**: One factual claim per item, each paired with the source URL it came from. Never fabricate URLs. Every URL you cite must be one your web_search tool actually returned.
 - **counter_arguments**: The strongest case AGAINST your thesis that credible sources have made. This is not optional. If after searching you genuinely cannot find counter-evidence, write "No credible sources have argued against [thesis claim]" — and that fact itself should reduce your confidence (an absence of counter-evidence might mean you didn't search hard enough).
 - **confidence**: 0-100. Calibrate it. 80+ should be reserved for cases where the news is clear, recent, and uncontested. 50-70 is normal for "leaning but not certain." Below 40 means "the news is mixed or the question is too speculative for news to be decisive."
 - **signal**:
@@ -95,7 +106,8 @@ Highest to lowest:
 # WHAT NOT TO DO
 
 - DO NOT speculate beyond what your evidence supports.
-- DO NOT invent dates, names, quotes, or URLs. Every URL you cite must be one web_search actually returned.
+- DO NOT invent dates, names, claims, or URLs. Every URL you cite must be one web_search actually returned.
+- DO NOT emit an evidence item without a source_url unless the item is an explicit cross-reference to other items in your list.
 - DO NOT lazily say "more reporting is needed" — that's what your search budget is for. Use it.
 - DO NOT recommend a position size or USDC amount — that's the Judge's job. You only emit YES/NO/PASS + confidence.
 - DO NOT lecture about uncertainty in your reasoning field — quantify it via your confidence number.
@@ -170,7 +182,7 @@ export async function runNewsAgent(
     market_url: context.url,
     market_question: context.question,
     thesis: result.parsed.thesis as string,
-    evidence: result.parsed.evidence as AgentTrace["evidence"],
+    evidence: normalizeEvidence(result.parsed.evidence),
     counter_arguments: result.parsed.counter_arguments as string,
     confidence: result.parsed.confidence as number,
     signal: result.parsed.signal as AgentTrace["signal"],

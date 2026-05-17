@@ -47,6 +47,16 @@ interface GammaEventRaw {
   closed?: boolean;
 }
 
+/**
+ * Sub-market selection band for event URLs. A sub-market is "moderate" when
+ * its YES price is in this closed interval — those have actual edge available
+ * for the bot to express. Picking by highest volume alone consistently selects
+ * near-resolved long-shots ($0.001 Bolívar, $0.002 Uzbekistan) because pre-
+ * resolution volume accumulates on those for the entire event lifetime.
+ */
+export const MODERATE_PRICE_LOW = 0.1;
+export const MODERATE_PRICE_HIGH = 0.9;
+
 function parseVolume(m: GammaMarketRaw): number {
   if (typeof m.volumeNum === "number") return m.volumeNum;
   if (typeof m.volume === "number") return m.volume;
@@ -165,6 +175,22 @@ function parse24hVolume(m: GammaMarketRaw): number | undefined {
   return undefined;
 }
 
+/**
+ * Pull the YES contract price (in [0,1]) from a Gamma raw market. Returns
+ * undefined when the row has no prices or the parsed value isn't finite.
+ * Shared between buildContextFromMarketRaw and the event sub-market
+ * selection logic.
+ */
+function getYesPriceFromRaw(raw: GammaMarketRaw): number | undefined {
+  const outcomes = parseArrayField<string>(raw.outcomes);
+  const prices = parseArrayField<string>(raw.outcomePrices).map((p) =>
+    typeof p === "string" ? Number.parseFloat(p) : (p as number),
+  );
+  const yesIdx = outcomes.findIndex((o) => /^yes$/i.test(o));
+  const price = yesIdx >= 0 ? prices[yesIdx] : prices[0];
+  return Number.isFinite(price) ? price : undefined;
+}
+
 function buildContextFromMarketRaw(
   url: string,
   raw: GammaMarketRaw,
@@ -246,20 +272,62 @@ export async function fetchMarketContext(url: string): Promise<MarketContext> {
   );
   const candidates = activeMarkets.length > 0 ? activeMarkets : event.markets;
 
-  // Pick highest-volume sub-market.
-  const sorted = [...candidates].sort((a, b) => parseVolume(b) - parseVolume(a));
-  const picked = sorted[0]!;
+  // ── Sub-market selection ─────────────────────────────────────────────────
+  // Naïve highest-volume picks the near-resolved long-shot ($0.001 Bolívar,
+  // $0.002 Uzbekistan) because those tend to have high cumulative volume
+  // from their pre-resolution life. Prefer sub-markets whose YES price is in
+  // a moderate range — those have actual edge available. Fall back to
+  // highest-volume overall only when no moderate-range candidate exists
+  // (every-candidate-is-a-longshot events) and log the fallback so the
+  // selection rationale is visible in the trace.
+  const annotated = candidates.map((raw) => {
+    const yesPrice = getYesPriceFromRaw(raw);
+    const vol = parseVolume(raw);
+    const inModerate =
+      typeof yesPrice === "number" &&
+      yesPrice >= MODERATE_PRICE_LOW &&
+      yesPrice <= MODERATE_PRICE_HIGH;
+    return { raw, yesPrice, vol, inModerate };
+  });
 
-  // Tell the caller (and surface in CI logs) which sub-market we selected.
-  const others = sorted
-    .slice(1, 4)
-    .map((m) => `"${m.question.slice(0, 50)}" ($${Math.round(parseVolume(m)).toLocaleString()})`)
-    .join(", ");
+  const moderate = annotated.filter((a) => a.inModerate);
+  const pool = moderate.length > 0 ? moderate : annotated;
+  const sorted = [...pool].sort((a, b) => b.vol - a.vol);
+  const picked = sorted[0]!;
+  const usedFallback = moderate.length === 0;
+
+  // Log every sub-market with price + volume + filter outcome so the trace
+  // shows exactly why we picked what we picked.
+  const fmtPrice = (p?: number) =>
+    typeof p === "number" ? `$${p.toFixed(3)}` : "$?.???";
+  const fmtVol = (v: number) =>
+    v >= 1000
+      ? `$${(v / 1000).toFixed(1)}k`
+      : `$${Math.round(v).toLocaleString()}`;
+  const annotatedForLog = [...annotated].sort((a, b) => b.vol - a.vol);
+  const lines = annotatedForLog
+    .map((a) => {
+      const tag = a.inModerate
+        ? "moderate, candidate"
+        : `extreme, ${usedFallback ? "in fallback pool" : "skipped"}`;
+      return `    "${a.raw.question.slice(0, 60)}" YES=${fmtPrice(
+        a.yesPrice,
+      )} vol=${fmtVol(a.vol)} [${tag}]`;
+    })
+    .join("\n");
+  const filterSummary = usedFallback
+    ? `Filter: 0 in [${MODERATE_PRICE_LOW}, ${MODERATE_PRICE_HIGH}], ${annotated.length} extreme — FALLBACK to highest-volume overall.`
+    : `Filter: ${moderate.length} in [${MODERATE_PRICE_LOW}, ${MODERATE_PRICE_HIGH}], ${
+        annotated.length - moderate.length
+      } extreme.`;
+  const selectedLabel = usedFallback
+    ? "Selected highest-volume (fallback — no moderate-range candidates):"
+    : "Selected highest-volume in moderate range:";
   console.log(
-    `[fetchMarketContext] Event URL — ${event.markets.length} sub-markets found. Selected highest-volume: "${picked.question}" (volume=$${Math.round(parseVolume(picked)).toLocaleString()}, slug=${picked.slug}). Others in top: ${others}`,
+    `[fetchMarketContext] Event URL — ${annotated.length} sub-markets:\n${lines}\n  ${filterSummary}\n  ${selectedLabel} "${picked.raw.question}" (YES=${fmtPrice(picked.yesPrice)}, vol=${fmtVol(picked.vol)}, slug=${picked.raw.slug})`,
   );
 
-  return buildContextFromMarketRaw(url, picked);
+  return buildContextFromMarketRaw(url, picked.raw);
 }
 
 interface OrderbookLevel {

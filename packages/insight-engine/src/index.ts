@@ -52,6 +52,9 @@ export {
   DUST_SIZE_USD,
   formatEdgeAbs,
   formatEdgeSigned,
+  ENSEMBLE_VARIANTS,
+  ENSEMBLE_MODELS,
+  type EnsembleVariant,
   type JudgeRecommendation,
 } from "./agents/judge.js";
 export {

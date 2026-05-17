@@ -181,7 +181,7 @@ function makeBot(env: Env): Bot {
       `Stoa InsightAgent commands:
 /start — create your wallet, see funding addresses
 /preview <url> — free one-shot summary
-/analyze <url> — $0.10, multi-agent analysis + trace pin
+/analyze <url> — $0.15, multi-agent analysis + trace pin
 /confirm <orderId> — $0.20, execute the trade (mocked v0)
 /balance — your USDC on Arc + Base
 /positions — your open orders

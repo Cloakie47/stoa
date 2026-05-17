@@ -20,13 +20,28 @@ export type AgentName =
 
 export type Signal = "YES" | "NO" | "PASS";
 
+/**
+ * One piece of cited evidence. Every numeric or factual claim must carry a
+ * source_url + source_name; when the agent cannot ground the claim it must
+ * either omit the item or set source_url=null + source_name="unverified"
+ * (the schema requires the fields to be present, just allows null URL).
+ *
+ * For Polymarket-derived facts (orderbook prices, depth, volume) there is
+ * no third-party URL — use the market URL itself as source_url and
+ * "Polymarket orderbook" / "Polymarket Gamma" as source_name.
+ */
 export interface EvidenceItem {
-  /** Free-text source name, e.g. "Reuters", "X @user", "polymarket-orderbook". */
-  source: string;
-  /** Short quote or extracted fact, max ~300 chars. */
-  quote: string;
-  /** Optional URL the agent can cite. */
-  url?: string;
+  /** One-sentence factual statement. */
+  claim: string;
+  /** URL of the source the agent retrieved this from. NULL when the agent
+   *  cannot find a defensible URL (the formatter renders these as 'unverified'). */
+  source_url: string | null;
+  /** Publication or domain name, e.g. "Reuters", "Bogotá Post", "Polymarket orderbook". */
+  source_name: string;
+  /** Agent's self-rated confidence in this specific claim. */
+  confidence?: "high" | "medium" | "low";
+  /** Judge-only: which specialist surfaced this evidence. */
+  specialist?: "News" | "Sentiment" | "Historical" | "MarketStructure";
   /** ISO 8601 timestamp of the source, if known. */
   timestamp?: string;
 }

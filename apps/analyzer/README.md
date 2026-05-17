@@ -96,8 +96,9 @@ Set every one of these in Railway's dashboard under **Variables**. Many duplicat
 | `BASE_CHAIN_ID` | no | `8453` | Default is correct. |
 | `ARC_USDC` | no | `0x36000…` | Default is correct. |
 | `BASE_USDC` | no | `0x833589…` | Default is correct. |
-| `STOA_FEE_ANALYZE_USDC` | no | `100000` | $0.10. |
+| `STOA_FEE_ANALYZE_USDC` | no | `150000` | $0.15. |
 | `STOA_FEE_CONFIRM_USDC` | no | `200000` | $0.20. |
+| `STOA_EDGE_THRESHOLD_BPS` | no | `400` | Minimum absolute edge (bps) before a non-PASS recommendation. Set lower for demo (e.g. `200` = 2¢); leave at `400` for production. |
 
 ## Operator deployment to Railway
 
@@ -202,7 +203,7 @@ cd apps/bot
 npx pnpm run simulate
 ```
 
-Expected: two real Arc Testnet tx hashes (one for $0.10 analyze, one for $0.20 confirm) printed with arcscan URLs.
+Expected: two real Arc Testnet tx hashes (one for $0.15 analyze, one for $0.20 confirm) printed with arcscan URLs.
 
 ## Known limitations (v0)
 

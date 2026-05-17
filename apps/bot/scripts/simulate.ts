@@ -6,7 +6,7 @@
  *   2. Uses TEST_USER_PRIVATE_KEY if set, else generates a fresh test wallet
  *      and prints its address (so the operator can fund it before re-running).
  *   3. Confirms the test wallet has ≥ $0.30 USDC on Arc Testnet.
- *   4. Simulates /analyze: fires a real $0.10 StoaSettler.settle on Arc with
+ *   4. Simulates /analyze: fires a real $0.15 StoaSettler.settle on Arc with
  *      a non-zero trace hash (the trace itself is faked — we test the
  *      payment path, not the analysis cost).
  *   5. Simulates /confirm: fires a real $0.20 StoaSettler.settle on Arc with
@@ -96,7 +96,7 @@ function buildCfg(): BotCoreConfig {
     STOA_SPLITTER: "0x114942B5FeebFDf9F1FA2F161eA9C2A1754C407F",
     STOA_TRACEPIN: "0x657355b621494C5F99253ce9A4c2cE8B9b488B7B",
     BASE_USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    STOA_FEE_ANALYZE_USDC: "100000",
+    STOA_FEE_ANALYZE_USDC: "150000",
     STOA_FEE_CONFIRM_USDC: "200000",
     TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN ?? "",
     ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "",
@@ -150,9 +150,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  // ── Step 1: /analyze fee ($0.10) with a non-zero trace hash ─────────────────
+  // ── Step 1: /analyze fee ($0.15) with a non-zero trace hash ─────────────────
   console.log("\n── /analyze simulation ─────────────────────────────────────");
-  console.log("Paying $0.10 from test wallet → StoaSettler.settle()");
+  console.log("Paying $0.15 from test wallet → StoaSettler.settle()");
   console.log("  Split: 70/20/10 across [operator, maintainers, canteen]");
   console.log("  Trace pin: enabled (using a fake trace hash for this sim)");
 
