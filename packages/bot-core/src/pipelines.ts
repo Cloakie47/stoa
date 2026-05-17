@@ -13,7 +13,6 @@
  * simulator; HTTP-proxied via /internal endpoints when called from the
  * Railway analyzer service).
  */
-import { formatEdgeSigned } from "@stoa/insight-engine";
 import type { FullTrace, JudgeTrace } from "@stoa/insight-engine";
 
 import type { BotCoreConfig } from "./config.js";
@@ -322,79 +321,161 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   const yes = clamp01(j.market_price_yes);
   const no = 1 - yes;
   const pYes = clamp01(j.model_probability_yes);
-  const ciLow = clamp01(j.ci_low ?? Math.max(0, pYes - 0.15));
-  const ciHigh = clamp01(j.ci_high ?? Math.min(1, pYes + 0.15));
 
-  // Outside view + inside view are nullable — when the Historical agent
-  // could not anchor a reference class, the Judge sets both to null and the
-  // formatter hides those lines (replaced with a single "Reference class:
-  // insufficient" line below).
-  const hasOutsideView =
-    typeof j.outside_view_p_yes === "number" && Number.isFinite(j.outside_view_p_yes);
-  const outsideView = hasOutsideView ? clamp01(j.outside_view_p_yes!) : null;
-  const insideAdj = hasOutsideView ? (j.inside_view_adjustment ?? 0) : null;
-
-  // Edge sign: positive = YES side; we report whichever side the trade is on
-  // (or the raw signed edge_yes on PASS so the body matches the header text).
-  const edgeSigned =
-    j.signal === "NO" ? -Math.abs(j.edge_no) : j.edge_yes;
-  const edgeStr = formatEdgeSigned(edgeSigned);
-
+  // ── Section 1: verdict header ───────────────────────────────────────────
   const verdictEmoji =
     j.signal === "YES" ? "📈" : j.signal === "NO" ? "📉" : "⏸";
   const verdictLabel = formatVerdict(j.signal);
-  // IMPORTANT: emit "BUY YES" / "BUY NO" — NOT "BUY_YES" / "BUY_NO". The
-  // underscore is the legacy-Markdown italic delimiter; embedding it in the
-  // verdict header opened an unterminated italic span that swallowed bold
-  // formatting on every subsequent section header AND broke the [tx](url)
-  // hyperlink on the on-chain line. Restoring the space restores all three.
-  const verdictHeader =
-    j.signal === "PASS"
-      ? `${verdictEmoji} ${verdictLabel} — ${j.recommendation_reason ?? "no actionable edge"}`
-      : `${verdictEmoji} ${verdictLabel} — ${shortHeadline(j.thesis)}`;
 
-  // ── Ensemble agreement line ──
   const ens = trace.judge_ensemble;
   const ensSize = ens?.runs.length ?? 1;
-  const verdictAg = ens?.verdict_agreement ?? 1;
   const directionAg = ens?.directional_agreement ?? 1;
-  const ensembleLine =
-    ensSize > 1
-      ? `  Ensemble: ${ensSize}-model median, verdict ${(verdictAg * 100).toFixed(0)}%, direction ${(directionAg * 100).toFixed(0)}%`
-      : `  Ensemble: 1 model (disabled or fallback)`;
+  const edgeBpsAbs = Math.abs(j.edge_yes) * 10_000;
+  const strengthLabel =
+    j.signal === "PASS"
+      ? "no clear edge"
+      : edgeBpsAbs >= 800 && directionAg >= 1
+        ? "strong signal"
+        : edgeBpsAbs >= 400 && directionAg >= 0.67
+          ? "moderate signal"
+          : "weak signal";
 
-  // ── Recommended action block ──
-  // For PASS: replace the "PASS — same reason as header" redundancy with a
-  // forward-looking "Wait. Re-enter on the first of: <triggers>". For the
-  // BUY verdicts, keep the standard entry/size/stop block.
-  const sizePct =
-    bankrollUsd > 0 ? (j.recommended_size_usdc / bankrollUsd) * 100 : 0;
-  const entryPrice = j.signal === "NO" ? no : yes;
-  let actionBlock: string;
-  if (j.signal === "PASS") {
-    const triggers = (j.reevaluation_triggers ?? [])
-      .slice(0, 3)
-      .map((t) => `    • ${truncate(t, 200)}`)
-      .join("\n");
-    actionBlock = triggers
-      ? `*Recommended action*\n  Wait. Re-enter on the first of:\n${triggers}`
-      : `*Recommended action*\n  Wait — re-run /analyze when material new information arrives.`;
-  } else {
-    actionBlock =
-      `*Recommended action*\n` +
-      `  ${verdictLabel} @ $${entryPrice.toFixed(3)} or better\n` +
-      `  Size: $${j.recommended_size_usdc.toFixed(2)} (${sizePct.toFixed(1)}% of $${bankrollUsd.toFixed(2)} bankroll, quarter-Kelly)\n` +
-      `  Stop: exit if ${j.signal === "YES" ? `YES drops below $${(yes * 0.85).toFixed(2)}` : `NO drops below $${(no * 0.85).toFixed(2)}`}\n` +
-      `  Hold until: resolution or trigger`;
+  const headerLines: string[] = [
+    `${verdictEmoji} ${verdictLabel} — ${strengthLabel}`,
+    j.signal === "PASS"
+      ? j.recommendation_reason || shortHeadline(j.thesis)
+      : shortHeadline(j.thesis),
+  ];
+  if (j.signal !== "PASS" && ensSize > 1) {
+    const nAgree = Math.round(directionAg * ensSize);
+    headerLines.push(`${nAgree} of ${ensSize} AI models agree on direction.`);
   }
 
-  // ── Evidence ──
-  // Render each evidence item as a Markdown hyperlink so tapping a bullet
-  // opens the source URL in Telegram. We stay on legacy Markdown parse mode
-  // (the rest of the message uses *bold* / `code` / [link](url)), so
-  // escape the bracket chars that would break legacy-Markdown link parsing,
-  // plus the chars that would unintentionally trigger formatting inside the
-  // link text. URLs are left raw — legacy MD accepts them as-is.
+  // ── Section 2: market block ─────────────────────────────────────────────
+  const marketLines = [
+    `Market: ${truncate(trace.market_question, 200)}`,
+    `Now:    YES $${yes.toFixed(2)} / NO $${no.toFixed(2)}`,
+  ];
+
+  // ── Section 3: confidence line ──────────────────────────────────────────
+  const confidenceLine = renderConfidenceLine(j.signal, pYes);
+
+  // ── Section 4: trade plan / wait block (branching) ──────────────────────
+  const tradePlanBlock = renderTradePlanBlock({
+    judge: j,
+    bankrollUsd,
+    yes,
+    no,
+  });
+
+  // ── Section 5: why this is the call (citations) ─────────────────────────
+  const whyBlock = renderWhyBlock(j);
+
+  // ── Section 6: what could go wrong (BUY only) ───────────────────────────
+  const whatGoesWrongBlock =
+    j.signal === "PASS"
+      ? null
+      : renderWhatGoesWrongBlock(j, j.recommended_size_usdc);
+
+  // ── Section 7: re-evaluation triggers ───────────────────────────────────
+  const watchBlock = renderWatchBlock(j);
+
+  // ── Section 8: proof of analysis ────────────────────────────────────────
+  const proofBlock = renderProofBlock(txHash, ipfsCid);
+
+  // ── Section 9: separator ────────────────────────────────────────────────
+  const separator = "────────────────────────────────────────";
+
+  // ── Section 10: footer CTA (branching) ──────────────────────────────────
+  const footerCta =
+    j.signal === "PASS"
+      ? `No trade to confirm right now. The bot only recommends trades when edge exceeds 4¢ — a discipline that saves you from noise trades.`
+      : `Ready to execute? /confirm ${orderId}\n  ($0.20 execution fee on Arc + your trade on Limitless)`;
+
+  // ── Section 11: request footer ──────────────────────────────────────────
+  const requestFooter = `_Request \`${requestId}\` — $0.15 charged, split 70/20/10 atomic on Arc._`;
+
+  const parts: (string | null)[] = [
+    ...headerLines,
+    "",
+    ...marketLines,
+    confidenceLine,
+    "",
+    tradePlanBlock,
+    "",
+    whyBlock,
+    "",
+    whatGoesWrongBlock,
+    whatGoesWrongBlock ? "" : null,
+    watchBlock,
+    "",
+    proofBlock,
+    "",
+    separator,
+    footerCta,
+    "",
+    requestFooter,
+  ];
+  return parts.filter((p): p is string => p !== null).join("\n");
+}
+
+// ── Section helpers ────────────────────────────────────────────────────────
+
+function renderConfidenceLine(
+  signal: JudgeTrace["signal"],
+  pYes: number,
+): string {
+  const sideProb = signal === "NO" ? 1 - pYes : pYes;
+  const sideWord = signal === "NO" ? "NO" : "YES";
+  const strengthWord =
+    sideProb >= 0.75 ? "high" : sideProb >= 0.6 ? "moderate" : "low";
+  if (signal === "PASS") {
+    return `Confidence: ${Math.round(pYes * 100)}% YES / ${Math.round(
+      (1 - pYes) * 100,
+    )}% NO — no clear edge`;
+  }
+  return `Confidence: ${Math.round(sideProb * 100)}% chance ${sideWord} wins (${strengthWord})`;
+}
+
+function renderTradePlanBlock(args: {
+  judge: JudgeTrace;
+  bankrollUsd: number;
+  yes: number;
+  no: number;
+}): string {
+  const { judge: j, bankrollUsd, yes, no } = args;
+  if (j.signal === "PASS") {
+    const reason = j.recommendation_reason
+      ? truncate(j.recommendation_reason, 280)
+      : "The market is pricing this close to where the model estimates it should be.";
+    return (
+      `*Wait — no clear edge right now*\n` +
+      `  ${reason}\n` +
+      `  Stoa won't recommend a trade with edge under 4¢ — a discipline that saves you from noise trades.`
+    );
+  }
+  const verdictSide = j.signal === "NO" ? "NO" : "YES";
+  const entryPrice = j.signal === "NO" ? no : yes;
+  const stopPrice = entryPrice * 0.85;
+  const secondHalfPrice = (entryPrice + stopPrice) / 2;
+  const tp1 = entryPrice + 0.4 * (1.0 - entryPrice);
+  const tp2 = entryPrice + 0.9 * (1.0 - entryPrice);
+  const sizeUsd = j.recommended_size_usdc;
+  const sizePct = bankrollUsd > 0 ? (sizeUsd / bankrollUsd) * 100 : 0;
+  const resolutionWhen = j.resolution_date_estimate || "market resolution";
+  const fmt = (n: number) => `$${n.toFixed(2)}`;
+  return (
+    `*How to trade*\n` +
+    `  Buy:         ${verdictSide} @ ${fmt(entryPrice)} or cheaper\n` +
+    `  Spend:       ${fmt(sizeUsd)} (about ${Math.round(sizePct)}% of your ${fmt(bankrollUsd)} wallet)\n` +
+    `  Strategy:    half now, half if ${verdictSide} drops to ${fmt(secondHalfPrice)}\n` +
+    `  Take profit: sell half at ${verdictSide} ${fmt(tp1)}, sell rest at ${verdictSide} ${fmt(tp2)}\n` +
+    `  Stop loss:   sell everything if ${verdictSide} drops below ${fmt(stopPrice)}\n` +
+    `  Hold until:  ${resolutionWhen} or any exit trigger below`
+  );
+}
+
+function renderWhyBlock(j: JudgeTrace): string {
   const evidenceLines =
     j.evidence
       .slice(0, 4)
@@ -404,94 +485,56 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
         const name = escapeMarkdownLinkText(e.source_name ?? "unverified");
         const url = e.source_url;
         if (url) {
-          return `  [${i + 1}] [${claimEsc}](${url}) — ${name}`;
+          return `  ${i + 1} [${claimEsc}](${url}) — ${name}`;
         }
-        return `  [${i + 1}] ${claimEsc} — ${name || "unverified"}`;
+        return `  ${i + 1} ${claimEsc} — ${name || "unverified"}`;
       })
       .join("\n") || "  (no evidence emitted)";
+  return `*Why this is the call*\n${evidenceLines}`;
+}
 
-  // ── Risk decomposition ──
-  const riskLines =
-    j.risk_decomposition.length > 0
-      ? j.risk_decomposition
-          .slice(0, 4)
-          .map(
-            (r) =>
-              `  • ${truncate(r.scenario, 100)} — ${(r.probability * 100).toFixed(0)}%`,
-          )
-          .join("\n")
-      : "  (no risk decomposition)";
-  const triggers =
-    j.reevaluation_triggers.length > 0
-      ? j.reevaluation_triggers.slice(0, 5).join("; ")
-      : "no triggers emitted";
+function renderWhatGoesWrongBlock(
+  j: JudgeTrace,
+  sizeUsd: number,
+): string | null {
+  if (j.signal === "PASS") return null;
+  const oppositeSide = j.signal === "YES" ? "NO" : "YES";
+  const counterSide = oppositeSide; // for BUY_YES we surface NO-wins risks
+  const minProb = 0.01;
+  const buckets = j.risk_decomposition.filter(
+    (r) =>
+      r.probability >= minProb &&
+      (r.side === counterSide || r.side === "ambiguity"),
+  );
+  if (buckets.length === 0) return null;
+  // Sort by probability desc, cap at 4 lines.
+  const sorted = [...buckets].sort((a, b) => b.probability - a.probability).slice(0, 4);
+  const lines = sorted.map((r) => {
+    const pct = Math.round(r.probability * 100);
+    const scenario = truncate(r.scenario, 140);
+    if (r.side === "ambiguity") {
+      return `  • ${pct}% chance ${scenario}`;
+    }
+    return `  • ${pct}% chance ${scenario} → ${oppositeSide} wins, you lose $${sizeUsd.toFixed(2)}`;
+  });
+  return `*What could go wrong*\n${lines.join("\n")}`;
+}
 
-  // ── Calibration ──
-  const cal = j.calibration_adjustment;
-  const calBlock = cal
-    ? `*Calibration adjustment applied*\n` +
-      `  Domain: ${cal.domain}\n` +
-      `  Adjustment: ${cal.adjustment_applied > 0 ? "+" : ""}${cal.adjustment_applied} bps\n` +
-      `  Reason: ${truncate(cal.reason, 240)}`
-    : `*Calibration adjustment applied*\n  Domain: other — no adjustment`;
-
-  // ── Time to resolution ──
-  const hrs = trace.judge_ensemble?.aggregate
-    ? undefined
-    : undefined;
-  void hrs;
-
-  // ── On-chain artifacts ──
-  const arcLink = `[${shortHash(txHash)}](https://testnet.arcscan.app/tx/${txHash})`;
-  const ipfsLine = ipfsCid ? `IPFS:  \`${shortHash(ipfsCid)}\`` : `IPFS:  (no pin)`;
-
-  // Model-estimate block has two shapes depending on whether the Historical
-  // agent could anchor a reference class.
-  const modelEstimateLines = [
-    `*Model estimate*`,
-    `  P(YES) = ${pYes.toFixed(3)} [80% CI: ${ciLow.toFixed(2)} – ${ciHigh.toFixed(2)}]`,
-  ];
-  if (outsideView === null) {
-    modelEstimateLines.push(
-      `  Reference class: insufficient (Historical agent could not identify defensible reference class)`,
-    );
-  } else {
-    modelEstimateLines.push(
-      `  Outside view (base rate): ${outsideView.toFixed(3)}`,
-      `  Inside view adjustment: ${insideAdj! > 0 ? "+" : ""}${insideAdj!.toFixed(3)}`,
-    );
+function renderWatchBlock(j: JudgeTrace): string {
+  const triggers = (j.reevaluation_triggers ?? []).slice(0, 5);
+  if (triggers.length === 0) {
+    return `*Watch these signals to re-analyze*\n  • (no triggers emitted — re-run /analyze when material new information arrives)`;
   }
-  modelEstimateLines.push(`  Edge: ${edgeStr}`, ensembleLine);
+  const lines = triggers.map((t) => `  • ${truncate(t, 200)}`).join("\n");
+  return `*Watch these signals to re-analyze*\n${lines}`;
+}
 
-  return [
-    verdictHeader,
-    `Market: ${truncate(trace.market_question, 200)}`,
-    `Current price: YES $${yes.toFixed(3)} / NO $${no.toFixed(3)}`,
-    "",
-    ...modelEstimateLines,
-    "",
-    actionBlock,
-    "",
-    `*Why*`,
-    evidenceLines,
-    "",
-    `*What would invalidate this call*`,
-    riskLines,
-    `  → Re-run /analyze if: ${truncate(triggers, 300)}`,
-    "",
-    calBlock,
-    "",
-    `*On-chain artifacts*`,
-    `Arc tx: ${arcLink}`,
-    ipfsLine,
-    `Trace hash: \`${shortHash(trace.trace_hash ?? "0x")}\``,
-    "",
-    j.signal === "PASS"
-      ? `_No trade to confirm. Run /analyze on a different market._`
-      : `*To execute:* \`/confirm ${orderId}\`\n($0.20 execution fee + the trade itself on Limitless)`,
-    "",
-    `_Request \`${requestId}\` — $0.15 charged, split 70/20/10 atomic on Arc._`,
-  ].join("\n");
+function renderProofBlock(txHash: Hex, ipfsCid: string | null): string {
+  const arcLink = `[${shortHash(txHash)}](https://testnet.arcscan.app/tx/${txHash})`;
+  const ipfsLine = ipfsCid
+    ? `  Reasoning trace: [${shortHash(ipfsCid)}](https://gateway.pinata.cloud/ipfs/${ipfsCid})`
+    : `  Reasoning trace: (no pin)`;
+  return `*Proof of analysis (on-chain, immutable)*\n  Arc tx: ${arcLink}\n${ipfsLine}`;
 }
 
 /**

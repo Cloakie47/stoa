@@ -311,8 +311,14 @@ export const JUDGE_TRACE_JSON_SCHEMA = (() => {
     properties: {
       scenario: { type: "string" as const },
       probability: { type: "number" as const },
+      side: {
+        type: "string" as const,
+        enum: ["YES", "NO", "ambiguity"] as const,
+        description:
+          "Which outcome this scenario favors. 'ambiguity' = force-majeure / unclear resolution / neither side cleanly wins.",
+      },
     },
-    required: ["scenario", "probability"],
+    required: ["scenario", "probability", "side"],
     additionalProperties: false,
   };
   // Judge-side evidence items add a `specialist` tag so consumers can see
@@ -431,6 +437,11 @@ export const JUDGE_TRACE_JSON_SCHEMA = (() => {
         description:
           "Either 'stable' or 'decays_<X>_bps_per_day'. How fast the call goes stale.",
       },
+      resolution_date_estimate: {
+        type: ["string", "null"] as const,
+        description:
+          "Plain-English description of when this market resolves, e.g. 'second-round Colombian election (29 June 2026)'. NULL when no defensible estimate exists.",
+      },
       calibration_adjustment: {
         type: "object" as const,
         description:
@@ -480,6 +491,7 @@ export const JUDGE_TRACE_JSON_SCHEMA = (() => {
       "risk_decomposition",
       "reevaluation_triggers",
       "stability",
+      "resolution_date_estimate",
       "calibration_adjustment",
       "recommended_size_usdc",
     ],

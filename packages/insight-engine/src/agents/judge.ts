@@ -121,9 +121,19 @@ You output JSON with all the following fields. (Schema validation will catch mis
   status_quo_outcome    — "YES" or "NO".
   no_scenario           — {description, weight} of your specific NO story.
   yes_scenario          — {description, weight} of your specific YES story.
-  risk_decomposition    — array of {scenario, probability} buckets summing approximately to 1. 2-5 entries.
+  risk_decomposition    — array of {scenario, probability, side} buckets summing approximately to 1. 2-5 entries.
+                          side ∈ "YES" | "NO" | "ambiguity". The formatter uses
+                          side to surface counter-scenarios for the chosen verdict
+                          ("what could go wrong"), so be honest about which outcome
+                          each scenario actually produces. Use "ambiguity" for force-
+                          majeure, ambiguous resolution, or scenarios where neither
+                          side cleanly wins.
   reevaluation_triggers — array of 3-5 specific strings (events or price levels).
   stability             — "stable" or "decays_<X>_bps_per_day" where X is your decay estimate.
+  resolution_date_estimate — Plain-English when-it-resolves description, e.g.
+                          "second-round Colombian election (29 June 2026)" or
+                          "Drake's wedding date — currently unannounced". Set to
+                          NULL if you cannot identify a defensible date.
   calibration_adjustment — {domain, reason}. Pick one domain:
                             sports_short | sports_long | weather_short | weather_long |
                             tech_demo | politics | crypto_price | geopolitics |
@@ -332,11 +342,14 @@ export async function runJudgeAgent(
       description: "(no scenario emitted)",
       weight: 0.5,
     },
-    risk_decomposition:
-      (p.risk_decomposition as JudgeTrace["risk_decomposition"]) ?? [],
+    risk_decomposition: normalizeRiskDecomposition(p.risk_decomposition),
     reevaluation_triggers:
       (p.reevaluation_triggers as string[]) ?? [],
     stability: (p.stability as string) ?? "stable",
+    resolution_date_estimate:
+      typeof p.resolution_date_estimate === "string"
+        ? p.resolution_date_estimate
+        : null,
     recommendation_reason: rec.reason,
     timestamp: new Date().toISOString(),
     model,
@@ -358,6 +371,41 @@ export async function runJudgeAgent(
 
 function round4(n: number): number {
   return Math.round(n * 10_000) / 10_000;
+}
+
+/**
+ * Coerce a parsed risk_decomposition array to the canonical shape, tolerating
+ * the legacy {scenario, probability} (no `side`) format from traces pinned
+ * before the schema rev. When `side` is missing, mark "ambiguity" — the
+ * formatter then surfaces it under both BUY_YES and BUY_NO as a non-
+ * directional risk.
+ */
+function normalizeRiskDecomposition(
+  raw: unknown,
+): { scenario: string; probability: number; side: "YES" | "NO" | "ambiguity" }[] {
+  if (!Array.isArray(raw)) return [];
+  const out: {
+    scenario: string;
+    probability: number;
+    side: "YES" | "NO" | "ambiguity";
+  }[] = [];
+  for (const r of raw) {
+    if (typeof r !== "object" || r === null) continue;
+    const obj = r as Record<string, unknown>;
+    const scenario = typeof obj.scenario === "string" ? obj.scenario : null;
+    const probability =
+      typeof obj.probability === "number" && Number.isFinite(obj.probability)
+        ? obj.probability
+        : null;
+    if (!scenario || probability === null) continue;
+    const sideRaw = obj.side;
+    const side: "YES" | "NO" | "ambiguity" =
+      sideRaw === "YES" || sideRaw === "NO" || sideRaw === "ambiguity"
+        ? sideRaw
+        : "ambiguity";
+    out.push({ scenario, probability, side });
+  }
+  return out;
 }
 
 /**

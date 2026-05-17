@@ -123,6 +123,14 @@ export interface ScenarioWeight {
 export interface RiskBucket {
   scenario: string;
   probability: number;
+  /**
+   * Which outcome side this scenario favors. Used by the Telegram formatter
+   * to filter "What could go wrong" — for a BUY_YES recommendation, only
+   * side="NO" + side="ambiguity" buckets are surfaced (those are the ways
+   * the trade loses). "ambiguity" covers force-majeure / unclear-resolution
+   * scenarios where neither side cleanly wins.
+   */
+  side: "YES" | "NO" | "ambiguity";
 }
 
 export interface CalibrationAdjustment {
@@ -184,6 +192,14 @@ export interface JudgeTrace extends AgentTrace {
   reevaluation_triggers: string[];
   /** Free-text: "stable" or "decays_<X>_bps_per_day". */
   stability: string;
+  /**
+   * Best plain-English description of when the market resolves, e.g.
+   * "second-round Colombian election (29 June 2026)", "end of Q2 2026",
+   * or "Drake's wedding date — currently unannounced". NULL when the Judge
+   * cannot identify a defensible resolution date estimate. The formatter
+   * falls back to "market resolution" in that case.
+   */
+  resolution_date_estimate?: string | null;
   /** Calibration policy record (set after policy is applied). */
   calibration_adjustment?: CalibrationAdjustment;
   /** Always set — explanation of the recommendation (size or PASS reason). */
