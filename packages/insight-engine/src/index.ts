@@ -24,7 +24,10 @@
  *   - Types: AgentTrace, JudgeTrace, FullTrace, MarketContext, Signal
  */
 
-import { runHistoricalAgent } from "./agents/historical.js";
+import {
+  runHistoricalAgent,
+  synthesizeHistoricalFailureTrace,
+} from "./agents/historical.js";
 import { runJudgeAgent, runJudgeEnsemble } from "./agents/judge.js";
 import { runMarketStructureAgent } from "./agents/market_structure.js";
 import { runNewsAgent } from "./agents/news.js";
@@ -42,6 +45,7 @@ export {
   runNewsAgent,
   runSentimentAgent,
   runHistoricalAgent,
+  synthesizeHistoricalFailureTrace,
   runMarketStructureAgent,
   runJudgeAgent,
   runJudgeEnsemble,
@@ -197,11 +201,19 @@ export async function analyzeMarket(
       agentTraces.push(result.value.trace);
       runningCost += result.value.cost_usd;
     } else {
-      const msg = `[${agentName}] ${(result.reason as Error)?.message ?? String(result.reason)}`;
+      const err = result.reason as Error;
+      const msg = `[${agentName}] ${err?.message ?? String(err)}`;
       errors.push(msg);
       // Always surface failed agents — previously these were swallowed when
       // ≥2 other agents succeeded, making it impossible to debug from logs.
       console.warn(`[analyzeMarket] specialist failed: ${msg}`);
+      // Historical-failure has a special path: silently dropping it lets the
+      // Judge fabricate an outside view (the v1.1 Cepeda bug). Synthesize a
+      // null-reference-class trace so OUTSIDE-VIEW VALIDATION case A fires
+      // and the formatter shows "Reference class: insufficient" instead.
+      if (agentName === "historical") {
+        agentTraces.push(synthesizeHistoricalFailureTrace(context, err));
+      }
     }
   }
 

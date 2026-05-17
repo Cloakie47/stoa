@@ -342,10 +342,16 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
 
   const verdictEmoji =
     j.signal === "YES" ? "📈" : j.signal === "NO" ? "📉" : "⏸";
+  const verdictLabel = formatVerdict(j.signal);
+  // IMPORTANT: emit "BUY YES" / "BUY NO" — NOT "BUY_YES" / "BUY_NO". The
+  // underscore is the legacy-Markdown italic delimiter; embedding it in the
+  // verdict header opened an unterminated italic span that swallowed bold
+  // formatting on every subsequent section header AND broke the [tx](url)
+  // hyperlink on the on-chain line. Restoring the space restores all three.
   const verdictHeader =
     j.signal === "PASS"
-      ? `${verdictEmoji} PASS — ${j.recommendation_reason ?? "no actionable edge"}`
-      : `${verdictEmoji} BUY_${j.signal} — ${shortHeadline(j.thesis)}`;
+      ? `${verdictEmoji} ${verdictLabel} — ${j.recommendation_reason ?? "no actionable edge"}`
+      : `${verdictEmoji} ${verdictLabel} — ${shortHeadline(j.thesis)}`;
 
   // ── Ensemble agreement line ──
   const ens = trace.judge_ensemble;
@@ -376,7 +382,7 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   } else {
     actionBlock =
       `*Recommended action*\n` +
-      `  BUY_${j.signal} @ $${entryPrice.toFixed(3)} or better\n` +
+      `  ${verdictLabel} @ $${entryPrice.toFixed(3)} or better\n` +
       `  Size: $${j.recommended_size_usdc.toFixed(2)} (${sizePct.toFixed(1)}% of $${bankrollUsd.toFixed(2)} bankroll, quarter-Kelly)\n` +
       `  Stop: exit if ${j.signal === "YES" ? `YES drops below $${(yes * 0.85).toFixed(2)}` : `NO drops below $${(no * 0.85).toFixed(2)}`}\n` +
       `  Hold until: resolution or trigger`;
@@ -425,7 +431,7 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   const calBlock = cal
     ? `*Calibration adjustment applied*\n` +
       `  Domain: ${cal.domain}\n` +
-      `  Adjustment: ${cal.adjustment_applied >= 0 ? "+" : ""}${cal.adjustment_applied} bps\n` +
+      `  Adjustment: ${cal.adjustment_applied > 0 ? "+" : ""}${cal.adjustment_applied} bps\n` +
       `  Reason: ${truncate(cal.reason, 240)}`
     : `*Calibration adjustment applied*\n  Domain: other — no adjustment`;
 
@@ -452,7 +458,7 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   } else {
     modelEstimateLines.push(
       `  Outside view (base rate): ${outsideView.toFixed(3)}`,
-      `  Inside view adjustment: ${insideAdj! >= 0 ? "+" : ""}${insideAdj!.toFixed(3)}`,
+      `  Inside view adjustment: ${insideAdj! > 0 ? "+" : ""}${insideAdj!.toFixed(3)}`,
     );
   }
   modelEstimateLines.push(`  Edge: ${edgeStr}`, ensembleLine);
@@ -508,9 +514,52 @@ function clamp01(n: number | undefined): number {
   return Math.min(1, Math.max(0, n));
 }
 
+/**
+ * Compact a multi-sentence thesis into a verdict-header headline.
+ *
+ * Strategy:
+ *   1. Pack whole sentences (split on .!?) up to MAX_LEN — if at least one
+ *      full sentence fits, return that with no ellipsis.
+ *   2. Otherwise, the first sentence alone exceeds MAX_LEN. Truncate at the
+ *      last word boundary that fits and append "…" so the cut is clean.
+ *
+ * Previous version char-truncated at 120, which produced output like
+ * "…wins both runoff scenarios ..." (cut mid-clause, dangling spaces).
+ */
 function shortHeadline(thesis: string): string {
-  const first = thesis.split(/[.!?]/)[0] ?? thesis;
-  return truncate(first.trim(), 120);
+  const MAX_LEN = 200;
+  const trimmed = thesis.trim();
+  if (trimmed.length <= MAX_LEN) return trimmed;
+
+  // Split into sentences while keeping their terminators, so we can pack
+  // complete sentences back together.
+  const sentences = trimmed.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [trimmed];
+  let packed = "";
+  for (const s of sentences) {
+    const candidate = packed ? `${packed} ${s.trim()}` : s.trim();
+    if (candidate.length > MAX_LEN) break;
+    packed = candidate;
+  }
+  if (packed.length > 0) return packed;
+
+  // First sentence alone exceeds MAX_LEN. Word-boundary truncate the start.
+  const head = trimmed.slice(0, MAX_LEN - 1);
+  const lastSpace = head.lastIndexOf(" ");
+  const cut = lastSpace > MAX_LEN * 0.6 ? head.slice(0, lastSpace) : head;
+  return `${cut.replace(/[\s,;:—-]+$/, "")}…`;
+}
+
+/**
+ * Display label for the trade direction. NEVER returns a string with an
+ * underscore — Telegram legacy Markdown treats `_` as italic markup, and
+ * "BUY_YES" rendered the entire downstream message in italic (or as plain
+ * text) until the next `_`, which broke the bold section headers and the
+ * Arc-tx hyperlink. Always insert a space.
+ */
+function formatVerdict(signal: JudgeTrace["signal"]): string {
+  if (signal === "YES") return "BUY YES";
+  if (signal === "NO") return "BUY NO";
+  return "PASS";
 }
 
 function truncate(s: string, max: number): string {

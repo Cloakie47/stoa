@@ -128,7 +128,16 @@ export async function runHistoricalAgent(
     systemPrompt: SYSTEM_PROMPT,
     userMessage,
     outputSchema: HISTORICAL_TRACE_JSON_SCHEMA,
-    maxTokens: 4000,
+    // Sonnet 4.6 adaptive thinking can burn 3-5k tokens before emitting
+    // a single JSON byte. The prior 4000 cap caused stop_reason=max_tokens
+    // failures on long reference-class enumerations (e.g. Cepeda Colombia
+    // 2026-05-17), and the orchestrator then silently dropped Historical,
+    // letting the Judge fabricate an outside view. 16k leaves headroom for
+    // thinking + a full HistoricalTrace JSON.
+    maxTokens: 16000,
+    // No tools wired — keep the tool-iteration cap tiny so a runaway model
+    // can't burn extra iterations.
+    maxToolIterations: 1,
     adaptiveThinking: true,
   });
 
@@ -197,6 +206,53 @@ export async function runHistoricalAgent(
   };
 
   return { trace, cost_usd: result.cost_usd };
+}
+
+/**
+ * Construct a Historical AgentTrace representing "agent ran but produced
+ * nothing defensible" — used by the orchestrator when {@link runHistoricalAgent}
+ * throws (max_tokens, schema-validation, network error, etc.). Threading
+ * this synthetic trace into the Judge guarantees v1.1 OUTSIDE-VIEW
+ * VALIDATION case A fires: outside_view_p_yes = null, no fabricated base
+ * rate, formatter shows "Reference class: insufficient (Historical agent
+ * failure: …)".
+ *
+ * The synthesized trace is structurally indistinguishable from a clean
+ * agent run that emitted reference_class=null — same fields, same downstream
+ * handling — except the `notes_on_reference_class_limitations` carries the
+ * underlying error message so it surfaces in the on-chain trace.
+ */
+export function synthesizeHistoricalFailureTrace(
+  context: MarketContext,
+  error: Error,
+): AgentTrace {
+  return {
+    agent: "historical",
+    market_url: context.url,
+    market_question: context.question,
+    thesis:
+      "Historical agent failed to produce a trace; no defensible reference class available.",
+    evidence: [],
+    counter_arguments: "",
+    confidence: 0,
+    signal: "PASS",
+    reasoning:
+      "The Historical specialist did not return a usable response. The Judge must form its estimate from inside-view evidence (News / Sentiment / Market Structure) only.",
+    reference_class: null,
+    reference_class_size: null,
+    resolved_at_or_above_rate: null,
+    specific_examples: [],
+    confidence_in_reference_class: "none",
+    notes_on_reference_class_limitations: `Historical agent failed: ${error.message}`,
+    timestamp: new Date().toISOString(),
+    model: MODEL_SONNET,
+    token_usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    },
+  };
 }
 
 function renderUserMessage(context: MarketContext): string {
