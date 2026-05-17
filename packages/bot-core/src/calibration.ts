@@ -1,26 +1,34 @@
 /**
- * Domain-keyed calibration policy v1.1.
+ * Domain-keyed calibration policy v1.2.
  *
  * Takes the raw model_p_yes the Judge ensemble produced (median across runs)
  * plus a domain classification from the Judge itself, and returns an
- * adjusted_p_yes. v1.1 reverses the direction of v1.0 — the arxiv 2602.19520
- * regression slope > 1 means market prices are COMPRESSED toward 50% relative
- * to truth, so the bot's bias-corrected estimate should be pushed AWAY from
- * 50%, not toward it. v1.0 had it backwards (damp toward 0.5) which produced
- * the Uzbekistan-World-Cup pathology: a tiny raw prior (~0.01) got pulled to
- * ~0.13, manufacturing a 12-point edge on a $0.002 market.
+ * adjusted_p. v1.2 changes vs v1.1:
  *
- * v1.1 also introduces a moderate-prior gate: the paper's slopes are derived
- * from observed prices in the 0.2-0.8 range. Extrapolating to lottery markets
- * (p < 0.10 or p > 0.90) is dangerous, so the policy short-circuits to a
- * no-op for extreme priors.
+ *   - Widened extreme-prior gate from [0.10, 0.90] to [0.20, 0.80]. The
+ *     arxiv slope is fitted near p≈0.5; co-favorite tournament markets
+ *     (France 0.185, Spain 0.167, England 0.114 on the FIFA 2026 event)
+ *     sit exactly in 0.10-0.25 where the slope mis-applies and manufactures
+ *     edges the ensemble itself doesn't see.
+ *
+ *   - Lowered sports_long slope 1.30 → 1.10. The 1.30 was an aggressive
+ *     read of the arxiv 2602.19520 finding (1.74 on a narrower subset);
+ *     for Polymarket-style tournament outright markets 1.10 still pushes
+ *     in the right direction without flipping ensemble PASSes.
+ *
+ *   - Ensemble PASS preservation: when the Judge ensemble's aggregate
+ *     signal is PASS, the policy NEVER flips that to BUY_YES/BUY_NO via
+ *     a slope adjustment. `adjusted_p_capped` is forced back to `raw_p`,
+ *     `final_signal = "PASS"`, and `calibration_override` records
+ *     "ensemble_pass_preserved" in the pinned trace. Multi-agent consensus
+ *     beats a generic statistical refinement.
  *
  *   adjusted_p = 0.5 + slope * (raw_p - 0.5)  // clipped to [0.01, 0.99]
  *   slope > 1 expands away from 0.5; slope < 1 dampens toward 0.5.
  *
  * Slope table (per arxiv 2602.19520 + supplementary literature):
  *   sports_short   1.00  — well-calibrated, no adjustment
- *   sports_long    1.30  — long-horizon markets compress favorites toward 50%
+ *   sports_long    1.10  — long-horizon markets compress favorites toward 50%
  *   weather_short  0.85  — overconfident short-term (dampening IS correct)
  *   weather_long   1.10  — generic long-horizon underconfidence
  *   politics       1.05  — slight underconfidence on directional bets
@@ -29,23 +37,25 @@
  *   long_horizon_any 1.10 — universal long-horizon expansion
  *   other          1.00
  *
- * Policy version string is pinned in the trace, so when v1.2 ships the audit
+ * Policy version string is pinned in the trace, so when v1.3 ships the audit
  * log can show which policy was in effect.
  */
-import type {
-  CalibrationAdjustment,
-  CalibrationDomain,
+import {
+  MIN_EDGE_FOR_TRADE,
+  type CalibrationAdjustment,
+  type CalibrationDomain,
+  type Signal,
 } from "@stoa/insight-engine";
 
-/** Pinned in the trace; bump when slopes change. */
-export const CALIBRATION_POLICY_VERSION = "calibration-v1.1-2026-05-17";
+/** Pinned in the trace; bump when slopes/gate change. */
+export const CALIBRATION_POLICY_VERSION = "calibration-v1.2-2026-05-18";
 
 /** Lower bound of the moderate-prior gate — slopes are not validated below this. */
-export const CALIBRATION_GATE_LOW = 0.1;
+export const CALIBRATION_GATE_LOW = 0.2;
 /** Upper bound of the moderate-prior gate — symmetric with the low side. */
-export const CALIBRATION_GATE_HIGH = 0.9;
+export const CALIBRATION_GATE_HIGH = 0.8;
 
-const SPORTS_LONG_SLOPE = 1.3;
+const SPORTS_LONG_SLOPE = 1.1;
 const WEATHER_SHORT_SLOPE = 0.85;
 const WEATHER_LONG_SLOPE = 1.1;
 const POLITICS_SLOPE = 1.05;
@@ -113,12 +123,41 @@ function slopeForDomain(
   }
 }
 
+/**
+ * Mirror of `computeJudgeRecommendation`'s verdict logic — but standalone so
+ * applyCalibration can derive a would-be verdict from the candidate p without
+ * needing a balance / Kelly. Uses the default MIN_EDGE_FOR_TRADE; the demo
+ * runtime override (STOA_EDGE_THRESHOLD_BPS) only affects the orchestrator's
+ * final Kelly call, not this PASS-flip safety check.
+ */
+function deriveVerdictFromEdge(
+  model_p: number,
+  market_p: number,
+  threshold: number,
+): Signal {
+  if (!Number.isFinite(model_p) || model_p <= 0 || model_p >= 1) return "PASS";
+  if (!Number.isFinite(market_p) || market_p <= 0 || market_p >= 1) return "PASS";
+  const edge = model_p - market_p;
+  if (Math.abs(edge) < threshold) return "PASS";
+  return edge > 0 ? "YES" : "NO";
+}
+
 export interface ApplyCalibrationArgs {
-  raw_model_p_yes: number;
+  /** Raw model probability the Judge ensemble emitted (median across runs). */
+  raw_p: number;
   domain: CalibrationDomain;
+  /** Market YES price — used to detect would-be flips. */
+  market_p: number;
+  /**
+   * Ensemble's aggregate verdict (BEFORE calibration is applied). When this
+   * is "PASS", the policy refuses to let a slope adjustment flip it to
+   * BUY_YES/BUY_NO — the ensemble's multi-model consensus dominates.
+   */
+  ensemble_signal: Signal;
   hours_to_resolution?: number;
   /** Optional raw CI bounds — when supplied, the same slope is applied so the
-   *  point estimate stays inside the CI. */
+   *  point estimate stays inside the CI. Capped along with the point estimate
+   *  when ensemble_pass_preserved fires. */
   raw_ci_low?: number;
   raw_ci_high?: number;
   /** Reason text supplied by the Judge — preserved verbatim in the trace. */
@@ -126,81 +165,157 @@ export interface ApplyCalibrationArgs {
 }
 
 export interface ApplyCalibrationResult {
+  /**
+   * Final probability for downstream consumption (after gate, slope, AND
+   * ensemble-PASS preservation). Equals `raw_p` when the gate fired OR when
+   * the ensemble's PASS verdict was honored.
+   */
+  adjusted_p_capped: number;
+  /** The candidate probability the slope would have produced, BEFORE the
+   *  PASS-preservation cap. Identical to `adjusted_p_capped` when no
+   *  override fired. Kept for audit. */
   adjusted_p_yes: number;
-  /** Calibrated CI bound (or the raw value when CI input was not supplied / gate triggered). */
+  /** Calibrated CI bound (matches the point-estimate treatment). */
   adjusted_ci_low: number | undefined;
   adjusted_ci_high: number | undefined;
+  /** Post-everything verdict. The orchestrator should USE this rather than
+   *  re-deriving from `adjusted_p_capped`. */
+  final_signal: Signal;
+  /** "ensemble_pass_preserved" when the ensemble's PASS verdict was honored,
+   *  null otherwise. The label fires whenever ensemble_signal === "PASS" —
+   *  the gate may or may not have prevented a flip on its own. */
+  calibration_override: "ensemble_pass_preserved" | null;
+  /** Pinned to the trace. Includes both the raw slope shift
+   *  (`adjustment_applied`) and the effective shift after preservation
+   *  (`adjustment_applied_capped`). */
   adjustment: CalibrationAdjustment;
 }
 
 /**
- * Apply the v1.1 calibration policy. Returns the adjusted probability, the
- * (matching) CI bounds, and the full CalibrationAdjustment record.
+ * Apply the v1.2 calibration policy. Returns the capped probability, the
+ * pre-cap candidate probability, matching CI bounds, the final verdict, and
+ * the audit record.
  *
- * Gate: when raw_model_p_yes is outside [0.10, 0.90], the policy is a no-op
- * — slopes are validated for 0.2-0.8 prices in the source paper and
- * extrapolating to lottery markets manufactures spurious edges.
+ * Gate: when raw_p is outside [0.20, 0.80], the slope is a no-op — the arxiv
+ * slope is fitted near 0.5 and extrapolating to lottery / co-favorite markets
+ * manufactures spurious edges.
+ *
+ * Ensemble PASS preservation: when `ensemble_signal === "PASS"`, the result
+ * is forced to PASS with `adjusted_p_capped = raw_p`. This is a one-way
+ * cap — calibration may STRENGTHEN a BUY edge but cannot CREATE one when
+ * the multi-agent ensemble said no.
  */
 export function applyCalibration(
   args: ApplyCalibrationArgs,
 ): ApplyCalibrationResult {
   const {
-    raw_model_p_yes,
+    raw_p,
     domain,
+    market_p,
+    ensemble_signal,
     hours_to_resolution,
     raw_ci_low,
     raw_ci_high,
     judge_reason,
   } = args;
 
-  // ── Gate 1: extreme priors get NO adjustment ──────────────────────────────
-  // The arxiv 2602.19520 slopes are fitted on observed prices in 0.2-0.8.
-  // Extrapolating to lottery markets (Uzbekistan @ 0.002) generates a fake
-  // 12-point edge. Short-circuit to a no-op + record the gate in the trace.
-  if (raw_model_p_yes < CALIBRATION_GATE_LOW || raw_model_p_yes > CALIBRATION_GATE_HIGH) {
-    const gateReason =
-      `Raw model estimate (${raw_model_p_yes.toFixed(3)}) outside [${CALIBRATION_GATE_LOW}, ${CALIBRATION_GATE_HIGH}] moderate-prior gate. ` +
-      `Calibration policy not applied to extreme priors (arxiv 2602.19520 slopes validated for 0.2-0.8 range).`;
-    return {
-      adjusted_p_yes: raw_model_p_yes,
-      adjusted_ci_low: raw_ci_low,
-      adjusted_ci_high: raw_ci_high,
-      adjustment: {
-        domain,
-        adjustment_applied: 0,
-        reason: judge_reason ? `${judge_reason} ${gateReason}` : gateReason,
-        policy_version: CALIBRATION_POLICY_VERSION,
-        raw_model_p_yes,
-      },
-    };
-  }
-
-  // ── Gate 2: within band — apply the domain slope ──────────────────────────
+  // ── Phase 1: compute the candidate (post-slope, pre-cap) probability ────
   const isLongHorizon =
     typeof hours_to_resolution === "number" && hours_to_resolution > 24 * 30;
-  const { slope, reason } = slopeForDomain(domain, isLongHorizon);
+  const gateFired = raw_p < CALIBRATION_GATE_LOW || raw_p > CALIBRATION_GATE_HIGH;
 
-  const adjusted_p_yes = applySlope(raw_model_p_yes, slope);
-  const adjusted_ci_low =
-    typeof raw_ci_low === "number" && Number.isFinite(raw_ci_low)
-      ? applySlope(raw_ci_low, slope)
-      : raw_ci_low;
-  const adjusted_ci_high =
-    typeof raw_ci_high === "number" && Number.isFinite(raw_ci_high)
-      ? applySlope(raw_ci_high, slope)
-      : raw_ci_high;
-  const adjustment_bps = Math.round((adjusted_p_yes - raw_model_p_yes) * 10_000);
+  let candidate_p: number;
+  let candidate_ci_low: number | undefined;
+  let candidate_ci_high: number | undefined;
+  let slopeReason: string;
+  if (gateFired) {
+    candidate_p = raw_p;
+    candidate_ci_low = raw_ci_low;
+    candidate_ci_high = raw_ci_high;
+    slopeReason =
+      `Raw model estimate (${raw_p.toFixed(3)}) outside [${CALIBRATION_GATE_LOW}, ${CALIBRATION_GATE_HIGH}] moderate-prior gate. ` +
+      `Calibration slope not applied (arxiv 2602.19520 slopes fitted near p≈0.5).`;
+  } else {
+    const { slope, reason } = slopeForDomain(domain, isLongHorizon);
+    candidate_p = applySlope(raw_p, slope);
+    candidate_ci_low =
+      typeof raw_ci_low === "number" && Number.isFinite(raw_ci_low)
+        ? applySlope(raw_ci_low, slope)
+        : raw_ci_low;
+    candidate_ci_high =
+      typeof raw_ci_high === "number" && Number.isFinite(raw_ci_high)
+        ? applySlope(raw_ci_high, slope)
+        : raw_ci_high;
+    slopeReason = reason;
+  }
+
+  const adjustmentBpsRaw = Math.round((candidate_p - raw_p) * 10_000);
+
+  // ── Phase 2: derive the would-be verdict + apply ensemble-PASS cap ──────
+  const wouldBeVerdict = deriveVerdictFromEdge(
+    candidate_p,
+    market_p,
+    MIN_EDGE_FOR_TRADE,
+  );
+
+  let final_signal: Signal;
+  let adjusted_p_capped: number;
+  let adjusted_ci_low: number | undefined;
+  let adjusted_ci_high: number | undefined;
+  let calibration_override: "ensemble_pass_preserved" | null;
+  let adjustmentBpsCapped: number;
+  let capReason = "";
+
+  if (ensemble_signal === "PASS") {
+    // Ensemble said PASS — preserve it regardless of what calibration wanted
+    // to do. Whether the gate already kept us at raw_p or the slope would
+    // have flipped a flip, we ALWAYS cap to raw_p and tag the trace.
+    final_signal = "PASS";
+    adjusted_p_capped = raw_p;
+    adjusted_ci_low = raw_ci_low;
+    adjusted_ci_high = raw_ci_high;
+    calibration_override = "ensemble_pass_preserved";
+    adjustmentBpsCapped = 0;
+
+    if (wouldBeVerdict !== "PASS") {
+      // Calibration WOULD have flipped — log loudly so the operator can see
+      // the override fired and inspect the flip.
+      console.warn(
+        `[calibration] WARNING: would have flipped PASS→${wouldBeVerdict} via ${adjustmentBpsRaw} bps adjustment. Honoring ensemble PASS. raw_p=${raw_p.toFixed(4)}, adjusted_p=${candidate_p.toFixed(4)}, capped_p=${raw_p.toFixed(4)}.`,
+      );
+      capReason = ` Calibration would have flipped PASS→${wouldBeVerdict}; ensemble PASS preserved (cap to raw_p).`;
+    } else {
+      capReason = ` Ensemble PASS preserved (calibration would not have flipped).`;
+    }
+  } else {
+    // Ensemble was BUY — calibration applies normally. May strengthen the
+    // edge, may also reduce it; the orchestrator's Kelly stage handles
+    // whatever comes out.
+    final_signal = wouldBeVerdict;
+    adjusted_p_capped = candidate_p;
+    adjusted_ci_low = candidate_ci_low;
+    adjusted_ci_high = candidate_ci_high;
+    calibration_override = null;
+    adjustmentBpsCapped = adjustmentBpsRaw;
+  }
+
+  const reason = (judge_reason ? `${judge_reason} ` : "") + slopeReason + capReason;
 
   return {
-    adjusted_p_yes,
+    adjusted_p_capped,
+    adjusted_p_yes: candidate_p,
     adjusted_ci_low,
     adjusted_ci_high,
+    final_signal,
+    calibration_override,
     adjustment: {
       domain,
-      adjustment_applied: adjustment_bps,
-      reason: judge_reason ? `${judge_reason} ${reason}` : reason,
+      adjustment_applied: adjustmentBpsRaw,
+      adjustment_applied_capped: adjustmentBpsCapped,
+      calibration_override,
+      reason,
       policy_version: CALIBRATION_POLICY_VERSION,
-      raw_model_p_yes,
+      raw_model_p_yes: raw_p,
     },
   };
 }

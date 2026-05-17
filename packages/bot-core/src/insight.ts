@@ -92,6 +92,10 @@ export async function runFullAnalysis(
   const judge = result.trace.judge_trace;
   const rawPYes = judge.model_probability_yes;
   const market = result.trace.judge_trace.market_price_yes;
+  // The ensemble's aggregate signal — set inside aggregateEnsembleRuns from
+  // computeJudgeRecommendation(median_p, market_p). Capture it BEFORE any
+  // mutation so calibration v1.2's PASS-preservation has a stable input.
+  const ensembleSignal = judge.signal;
   const ctx: MarketContext = {
     url: result.trace.market_url,
     slug: "",
@@ -107,29 +111,32 @@ export async function runFullAnalysis(
     (judge.calibration_adjustment?.domain as CalibrationDomain | undefined) ??
     "other";
   const cal = applyCalibration({
-    raw_model_p_yes: rawPYes,
+    raw_p: rawPYes,
     domain,
+    market_p: market,
+    ensemble_signal: ensembleSignal,
     hours_to_resolution: hours,
     raw_ci_low: judge.ci_low,
     raw_ci_high: judge.ci_high,
     judge_reason: judge.calibration_adjustment?.reason,
   });
 
-  // Re-run Kelly on the adjusted probability. This is the load-bearing
-  // recompute — the user's recommended action follows from this.
+  // Re-run Kelly on the CAPPED probability. When the ensemble was PASS,
+  // cap === raw_p so the recommendation matches the ensemble's own. When
+  // the ensemble was BUY, cap === slope-adjusted p and may strengthen edge.
   const rec = computeJudgeRecommendation({
-    model_p_yes: cal.adjusted_p_yes,
+    model_p_yes: cal.adjusted_p_capped,
     market_p_yes: market,
     balance: userBalanceUsdc,
   });
 
   // Mutate judge_trace + FullTrace in place so consumers (DB, IPFS, formatter)
   // all see the calibrated values. We keep the RAW prob in calibration_adjustment.
-  judge.model_probability_yes = cal.adjusted_p_yes;
+  judge.model_probability_yes = cal.adjusted_p_capped;
   // CI bounds get the same slope transform — otherwise the point estimate can
   // fall outside its own CI (the v1.0 Uzbekistan symptom: P(YES)=0.13 with
-  // 80% CI 0.00–0.01). When the gate fires, applyCalibration returns the raw
-  // bounds verbatim, so this is always consistent with the point estimate.
+  // 80% CI 0.00–0.01). When the gate fires OR the cap fires, applyCalibration
+  // returns the raw bounds verbatim, so this is always consistent.
   if (typeof cal.adjusted_ci_low === "number") {
     judge.ci_low = Math.round(cal.adjusted_ci_low * 10_000) / 10_000;
   }
@@ -150,8 +157,13 @@ export async function runFullAnalysis(
 
   console.log(
     `[insight] calibration domain=${domain} raw_p=${rawPYes.toFixed(4)} ` +
-      `adjusted_p=${cal.adjusted_p_yes.toFixed(4)} bps=${cal.adjustment.adjustment_applied} ` +
-      `final_signal=${rec.signal} size=$${rec.size_usdc.toFixed(2)}`,
+      `ensemble=${ensembleSignal} ` +
+      `candidate_p=${cal.adjusted_p_yes.toFixed(4)} ` +
+      `capped_p=${cal.adjusted_p_capped.toFixed(4)} ` +
+      `bps_raw=${cal.adjustment.adjustment_applied} ` +
+      `bps_capped=${cal.adjustment.adjustment_applied_capped ?? cal.adjustment.adjustment_applied} ` +
+      `override=${cal.calibration_override ?? "-"} ` +
+      `final=${rec.signal} size=$${rec.size_usdc.toFixed(2)}`,
   );
 
   // ── Hash + IPFS pin ────────────────────────────────────────────────────

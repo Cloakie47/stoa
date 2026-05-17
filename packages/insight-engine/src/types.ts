@@ -135,10 +135,29 @@ export interface RiskBucket {
 
 export interface CalibrationAdjustment {
   domain: CalibrationDomain;
-  /** Signed bps shift from raw model_p_yes to final model_p_yes. */
+  /**
+   * Signed bps shift the slope/gate WOULD have produced before any override.
+   * For audit — shows what calibration alone wanted to do. When
+   * `calibration_override` is set, the effective shift is captured in
+   * `adjustment_applied_capped` instead.
+   */
   adjustment_applied: number;
+  /**
+   * Effective bps shift after PASS-preservation. Equals
+   * `adjustment_applied` when no override fired; equals 0 when the
+   * ensemble's PASS verdict was honored (`calibration_override` set).
+   * Defaults to `adjustment_applied` for back-compat with v1.1 traces.
+   */
+  adjustment_applied_capped?: number;
+  /**
+   * When set, indicates the calibrated probability was capped back to the
+   * ensemble's raw consensus rather than letting the slope adjustment
+   * propagate. Currently the only value is "ensemble_pass_preserved" —
+   * fired whenever the ensemble's aggregate signal was PASS.
+   */
+  calibration_override?: "ensemble_pass_preserved" | null;
   reason: string;
-  /** Policy version pinned in trace; e.g. "calibration-v1.0-2026-05-17". */
+  /** Policy version pinned in trace; e.g. "calibration-v1.2-2026-05-18". */
   policy_version: string;
   /** The raw model_p_yes the Judge originally emitted, before policy. */
   raw_model_p_yes: number;
