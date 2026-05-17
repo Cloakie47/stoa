@@ -21,8 +21,12 @@ import type { AgentTrace, TokenUsage } from "./types.js";
 /** Canonical model IDs — never construct date-suffixed variants. */
 export const MODEL_HAIKU = "claude-haiku-4-5" as const;
 export const MODEL_SONNET = "claude-sonnet-4-6" as const;
+export const MODEL_OPUS = "claude-opus-4-7" as const;
 
-export type ModelId = typeof MODEL_HAIKU | typeof MODEL_SONNET;
+export type ModelId =
+  | typeof MODEL_HAIKU
+  | typeof MODEL_SONNET
+  | typeof MODEL_OPUS;
 
 /** $/1M tokens per model. Used for budget cap estimation. */
 const PRICE_USD_PER_1M: Record<
@@ -33,6 +37,8 @@ const PRICE_USD_PER_1M: Record<
   [MODEL_HAIKU]: { input: 1.0, output: 5.0, cache_write: 1.25, cache_read: 0.1 },
   // Sonnet 4.6: $3/$15 base, cache write ~3.75 (1.25x input), cache read ~0.3 (0.1x input).
   [MODEL_SONNET]: { input: 3.0, output: 15.0, cache_write: 3.75, cache_read: 0.3 },
+  // Opus 4.7: $15/$75 base, cache write 1.25x input, cache read 0.1x input.
+  [MODEL_OPUS]: { input: 15.0, output: 75.0, cache_write: 18.75, cache_read: 1.5 },
 };
 
 export function estimateCostUsd(model: ModelId, usage: TokenUsage): number {
@@ -138,36 +144,51 @@ export const AGENT_TRACE_JSON_SCHEMA = {
 };
 
 /**
- * JSON Schema for the Judge's output. Extends AgentTrace with two extra
- * required fields.
+ * JSON Schema for the Judge's output. Extends AgentTrace with the
+ * Metaculus-template forecasting fields + the agent-signal snapshot.
+ *
+ * The verdict + size are advisory — the orchestrator computes the
+ * authoritative recommendation from model_probability_yes + market price
+ * via `computeJudgeRecommendation`.
  */
-export const JUDGE_TRACE_JSON_SCHEMA = {
-  type: "object" as const,
-  properties: {
-    ...AGENT_TRACE_JSON_SCHEMA.properties,
-    disagreement_analysis: {
-      type: "string" as const,
-      description:
-        "Plain-text reasoning about where the 4 agents agreed and disagreed, and how you resolved disagreements.",
+export const JUDGE_TRACE_JSON_SCHEMA = (() => {
+  const oneAgent = {
+    type: "object" as const,
+    properties: {
+      signal: { type: "string" as const, enum: ["YES", "NO", "PASS"] as const },
+      confidence: { type: "integer" as const },
     },
-    model_probability_yes: {
-      type: "number" as const,
-      description:
-        "Your aggregated estimate of P(YES) in [0, 1]. THIS IS THE KEY INPUT FOR SIZING — the orchestrator computes Kelly + edge from this value vs the market price. Calibrate carefully: this is not just a hand-wave of your confidence, it's a real probability the orchestrator will use to size a trade.",
+    required: ["signal", "confidence"],
+    additionalProperties: false,
+  };
+  const scenarioWeight = {
+    type: "object" as const,
+    properties: {
+      description: { type: "string" as const },
+      weight: { type: "number" as const },
     },
-    agent_signals: (() => {
-      // Named-keys schema for the 4 specialists. Structured outputs disallow
-      // `additionalProperties: <object>` — we have to enumerate explicitly.
-      const oneAgent = {
-        type: "object" as const,
-        properties: {
-          signal: { type: "string" as const, enum: ["YES", "NO", "PASS"] as const },
-          confidence: { type: "integer" as const },
-        },
-        required: ["signal", "confidence"],
-        additionalProperties: false,
-      };
-      return {
+    required: ["description", "weight"],
+    additionalProperties: false,
+  };
+  const riskBucket = {
+    type: "object" as const,
+    properties: {
+      scenario: { type: "string" as const },
+      probability: { type: "number" as const },
+    },
+    required: ["scenario", "probability"],
+    additionalProperties: false,
+  };
+  return {
+    type: "object" as const,
+    properties: {
+      ...AGENT_TRACE_JSON_SCHEMA.properties,
+      disagreement_analysis: {
+        type: "string" as const,
+        description:
+          "Plain-text reasoning about where the 4 agents agreed and disagreed, and how you resolved disagreements.",
+      },
+      agent_signals: {
         type: "object" as const,
         description:
           "Per-agent signal snapshot for audit. Always includes news, sentiment, historical, market_structure.",
@@ -179,23 +200,122 @@ export const JUDGE_TRACE_JSON_SCHEMA = {
         },
         required: ["news", "sentiment", "historical", "market_structure"],
         additionalProperties: false,
-      };
-    })(),
-    recommended_size_usdc: {
-      type: "number" as const,
-      description:
-        "Recommended position size in USDC. Must be 0 when signal is PASS. (Lower-bound + 20% cap enforced client-side.)",
+      },
+      // Core probability + sizing fields (advisory; orchestrator overrides)
+      model_probability_yes: {
+        type: "number" as const,
+        description:
+          "Your aggregated point estimate of P(YES) in [0,1]. Drives sizing.",
+      },
+      ci_low: {
+        type: "number" as const,
+        description: "10th-percentile estimate of P(YES) in [0,1].",
+      },
+      ci_high: {
+        type: "number" as const,
+        description: "90th-percentile estimate of P(YES) in [0,1].",
+      },
+      verdict: {
+        type: "string" as const,
+        enum: ["BUY_YES", "BUY_NO", "PASS"] as const,
+        description:
+          "Your advisory verdict; the orchestrator overrides this using edge vs market price.",
+      },
+      edge_bps: {
+        type: "integer" as const,
+        description:
+          "Signed integer — (model_p_yes - market_p_yes) * 10000. Advisory.",
+      },
+      // Metaculus-template forecasting fields
+      outside_view_p_yes: {
+        type: "number" as const,
+        description:
+          "The historical base rate alone, ignoring this case's specifics. In [0,1].",
+      },
+      inside_view_adjustment: {
+        type: "number" as const,
+        description:
+          "Signed: how far inside-view adjusted the estimate away from outside_view_p_yes. (inside_view_p_yes - outside_view_p_yes.)",
+      },
+      status_quo_outcome: {
+        type: "string" as const,
+        enum: ["YES", "NO"] as const,
+        description:
+          "What happens if nothing changes between now and resolution.",
+      },
+      no_scenario: scenarioWeight,
+      yes_scenario: scenarioWeight,
+      risk_decomposition: {
+        type: "array" as const,
+        description:
+          "Bucketed list of scenarios and their probabilities. Should sum approximately to 1.",
+        items: riskBucket,
+      },
+      reevaluation_triggers: {
+        type: "array" as const,
+        description:
+          "3-5 specific events or price thresholds that would change this call. Include at least one mechanical price stop.",
+        items: { type: "string" as const },
+      },
+      stability: {
+        type: "string" as const,
+        description:
+          "Either 'stable' or 'decays_<X>_bps_per_day'. How fast the call goes stale.",
+      },
+      calibration_adjustment: {
+        type: "object" as const,
+        description:
+          "Domain classification — the deterministic policy applies the actual adjustment in code.",
+        properties: {
+          domain: {
+            type: "string" as const,
+            enum: [
+              "sports_short",
+              "sports_long",
+              "weather_short",
+              "tech_demo",
+              "politics",
+              "crypto_price",
+              "geopolitics",
+              "entertainment",
+              "long_horizon_any",
+              "other",
+            ] as const,
+          },
+          reason: { type: "string" as const },
+        },
+        required: ["domain", "reason"],
+        additionalProperties: false,
+      },
+      recommended_size_usdc: {
+        type: "number" as const,
+        description:
+          "Advisory size in USDC. The orchestrator overrides this with the quarter-Kelly calculation.",
+      },
     },
-  },
-  required: [
-    ...AGENT_TRACE_JSON_SCHEMA.required,
-    "model_probability_yes",
-    "disagreement_analysis",
-    "agent_signals",
-    "recommended_size_usdc",
-  ],
-  additionalProperties: false,
-};
+    required: [
+      ...AGENT_TRACE_JSON_SCHEMA.required,
+      "disagreement_analysis",
+      "agent_signals",
+      "model_probability_yes",
+      "ci_low",
+      "ci_high",
+      "verdict",
+      "edge_bps",
+      "outside_view_p_yes",
+      "inside_view_adjustment",
+      "status_quo_outcome",
+      "no_scenario",
+      "yes_scenario",
+      "risk_decomposition",
+      "reevaluation_triggers",
+      "stability",
+      "calibration_adjustment",
+      "recommended_size_usdc",
+    ],
+    additionalProperties: false,
+  };
+})();
 
 /**
  * Lazy-singleton Anthropic client. Reads ANTHROPIC_API_KEY from env.

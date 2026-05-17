@@ -63,38 +63,118 @@ export interface AgentTrace {
 }
 
 /**
+ * Domain categories used by the deterministic calibration policy in
+ * `packages/bot-core/src/calibration.ts`. The Judge classifies the
+ * market into one of these; the policy applies the adjustment.
+ */
+export type CalibrationDomain =
+  | "sports_short"
+  | "sports_long"
+  | "weather_short"
+  | "tech_demo"
+  | "politics"
+  | "crypto_price"
+  | "geopolitics"
+  | "entertainment"
+  | "long_horizon_any"
+  | "other";
+
+export interface ScenarioWeight {
+  description: string;
+  /** Probability weight in [0,1]. Yes + No scenarios needn't sum to 1 — they're illustrative anchors. */
+  weight: number;
+}
+
+export interface RiskBucket {
+  scenario: string;
+  probability: number;
+}
+
+export interface CalibrationAdjustment {
+  domain: CalibrationDomain;
+  /** Signed bps shift from raw model_p_yes to final model_p_yes. */
+  adjustment_applied: number;
+  reason: string;
+  /** Policy version pinned in trace; e.g. "calibration-v1.0-2026-05-17". */
+  policy_version: string;
+  /** The raw model_p_yes the Judge originally emitted, before policy. */
+  raw_model_p_yes: number;
+}
+
+/**
  * Judge trace adds explicit agreement/disagreement analysis + market-price-
- * aware sizing on top of the AgentTrace shape.
+ * aware sizing on top of the AgentTrace shape. Now also carries the
+ * Metaculus-template forecasting fields (outside view, status quo,
+ * scenarios, re-evaluation triggers) and the calibration record.
  *
- * `signal` and `recommended_size_usdc` on a JudgeTrace are DERIVED in code
- * from `model_probability_yes` + `market_price_yes` (via the Kelly formula
- * in src/agents/judge.ts → `computeJudgeRecommendation`). The Judge model
- * outputs its own signal too, but the orchestrator overrides it to make sure
- * negative-EV trades never get a non-zero size — the model is advisory, the
- * formula is authoritative.
+ * `signal`, `recommended_size_usdc`, and the edge/kelly fields are
+ * DERIVED in code from `model_probability_yes` + `market_price_yes`
+ * (via `computeJudgeRecommendation`). The Judge model outputs its own
+ * advisory `signal` too, but the orchestrator overrides it so negative-EV
+ * trades never get a non-zero size.
  */
 export interface JudgeTrace extends AgentTrace {
   agent: "judge";
-  /** Plain-text reasoning about where the agents agreed and disagreed. */
   disagreement_analysis: string;
-  /** Per-agent (signal, confidence) snapshot — used for the audit trail. */
   agent_signals: Record<string, { signal: Signal; confidence: number }>;
-  /** The Judge's aggregated estimate of P(YES) in [0, 1]. Key input for sizing. */
+  /** Aggregated point estimate P(YES) in [0,1]. Drives sizing. */
   model_probability_yes: number;
-  /** The market's YES contract price at analysis time, in [0, 1]. */
+  /** Market's YES contract price at analysis time, in [0,1]. */
   market_price_yes: number;
-  /** Derived: model_probability_yes - market_price_yes. */
   edge_yes: number;
-  /** Derived: market_price_yes - model_probability_yes. */
   edge_no: number;
-  /**
-   * Derived: raw (full) Kelly fraction for the winning side, in [0, 1].
-   * The actual `recommended_size_usdc` uses quarter-Kelly with a 20% cap.
-   * 0 if `signal` is PASS.
-   */
   kelly_fraction: number;
-  /** Derived position size in USDC (0 if PASS). */
   recommended_size_usdc: number;
+
+  // ── Metaculus-template forecasting fields (added 2026-05-17) ───────────
+  /** 10th-percentile estimate of P(YES). */
+  ci_low: number;
+  /** 90th-percentile estimate of P(YES). */
+  ci_high: number;
+  /** Historical base rate before any case-specific adjustment. */
+  outside_view_p_yes: number;
+  /** Signed: final_inside_view_p_yes - outside_view_p_yes. */
+  inside_view_adjustment: number;
+  /** What happens if nothing changes between now and resolution. */
+  status_quo_outcome: "YES" | "NO";
+  no_scenario: ScenarioWeight;
+  yes_scenario: ScenarioWeight;
+  risk_decomposition: RiskBucket[];
+  /** Specific events / price thresholds that would change the call. */
+  reevaluation_triggers: string[];
+  /** Free-text: "stable" or "decays_<X>_bps_per_day". */
+  stability: string;
+  /** Calibration policy record (set after policy is applied). */
+  calibration_adjustment?: CalibrationAdjustment;
+  /** Always set — explanation of the recommendation (size or PASS reason). */
+  recommendation_reason: string;
+}
+
+/**
+ * One run inside a Judge ensemble — same fields as JudgeTrace plus the
+ * model identifier and any per-model cost.
+ */
+export interface JudgeEnsembleRun {
+  model: string;
+  trace: JudgeTrace;
+  cost_usd: number;
+}
+
+/**
+ * Aggregated ensemble output. `aggregate` is what downstream code uses
+ * for sizing; `runs` is preserved verbatim in the FullTrace for audit.
+ */
+export interface JudgeEnsemble {
+  /** Aggregated point estimate — median model_p_yes across runs. */
+  aggregate: JudgeTrace;
+  /** The individual runs that fed the aggregate. */
+  runs: JudgeEnsembleRun[];
+  /** Fraction of runs whose advisory verdict matched the majority, 0-1. */
+  agreement: number;
+  /** True when only 1 judge ran (ensembling disabled or fallback). */
+  fallback_single_model: boolean;
+  /** Sum of cost_usd across runs. */
+  total_cost_usd: number;
 }
 
 /**
@@ -112,6 +192,9 @@ export interface FullTrace {
   user_balance_usdc: number;
   agent_traces: AgentTrace[];
   judge_trace: JudgeTrace;
+  /** Full ensemble record (all runs + aggregation). Optional for back-compat
+   *  with the single-judge code path; `judge_trace` always mirrors `aggregate`. */
+  judge_ensemble?: JudgeEnsemble;
   final_signal: Signal;
   final_confidence: number;
   recommended_size_usdc: number;

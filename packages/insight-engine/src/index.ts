@@ -25,7 +25,7 @@
  */
 
 import { runHistoricalAgent } from "./agents/historical.js";
-import { runJudgeAgent } from "./agents/judge.js";
+import { runJudgeAgent, runJudgeEnsemble } from "./agents/judge.js";
 import { runMarketStructureAgent } from "./agents/market_structure.js";
 import { runNewsAgent } from "./agents/news.js";
 import { runSentimentAgent } from "./agents/sentiment.js";
@@ -44,7 +44,14 @@ export {
   runHistoricalAgent,
   runMarketStructureAgent,
   runJudgeAgent,
+  runJudgeEnsemble,
 };
+export {
+  computeJudgeRecommendation,
+  MIN_EDGE_FOR_TRADE,
+  DUST_SIZE_USD,
+  type JudgeRecommendation,
+} from "./agents/judge.js";
 export {
   fetchMarketContext,
   parsePolymarketUrl,
@@ -61,6 +68,7 @@ export {
 export {
   MODEL_HAIKU,
   MODEL_SONNET,
+  MODEL_OPUS,
   estimateCostUsd,
   getClient,
   setClient,
@@ -69,6 +77,12 @@ export type {
   AgentName,
   AgentTrace,
   JudgeTrace,
+  JudgeEnsemble,
+  JudgeEnsembleRun,
+  CalibrationDomain,
+  CalibrationAdjustment,
+  ScenarioWeight,
+  RiskBucket,
   FullTrace,
   MarketContext,
   Signal,
@@ -201,47 +215,44 @@ export async function analyzeMarket(
     );
   }
 
-  // 3. Judge aggregation — Sonnet 4.6 with adaptive thinking
-  const judgeResult = await runJudgeAgent({
+  // 3. Judge ensemble — Opus + Sonnet + Haiku in parallel, aggregated
+  //    via median model_p_yes + majority verdict. Falls back to single
+  //    model if STOA_DISABLE_ENSEMBLE=1 or all but one run fails.
+  const ensemble = await runJudgeEnsemble({
     context,
     userBalanceUsdc,
     agentTraces,
   });
-  runningCost += judgeResult.cost_usd;
+  runningCost += ensemble.total_cost_usd;
 
   if (runningCost > budgetCapUsd) {
     throw new Error(
-      `Analysis cost $${runningCost.toFixed(4)} exceeded budget cap of $${budgetCapUsd}. Investigate where the budget went: ${JSON.stringify(
-        {
-          per_agent: agentTraces.map((t) => ({
-            agent: t.agent,
-            tokens: t.token_usage,
-          })),
-          judge_tokens: judgeResult.trace.token_usage,
-        },
-        null,
-        2,
-      )}`,
+      `Analysis cost $${runningCost.toFixed(4)} exceeded budget cap of $${budgetCapUsd}. Per-run cost: ${ensemble.runs
+        .map((r) => `${r.model}=$${r.cost_usd.toFixed(4)}`)
+        .join(", ")}`,
     );
   }
 
-  // 4. Aggregate token usage across all 5 calls
+  // 4. Aggregate token usage across all calls
   let totalUsage = emptyUsage();
   for (const t of agentTraces) totalUsage = addUsage(totalUsage, t.token_usage);
-  totalUsage = addUsage(totalUsage, judgeResult.trace.token_usage);
+  for (const r of ensemble.runs) {
+    totalUsage = addUsage(totalUsage, r.trace.token_usage);
+  }
 
   // 5. Build the FullTrace
-  const finalSignal: Signal = judgeResult.trace.signal;
+  const finalSignal: Signal = ensemble.aggregate.signal;
   const fullTrace: FullTrace = {
     schema_version: "stoa.insight.v1",
     market_url: context.url,
     market_question: context.question,
     user_balance_usdc: userBalanceUsdc,
     agent_traces: agentTraces,
-    judge_trace: judgeResult.trace,
+    judge_trace: ensemble.aggregate,
+    judge_ensemble: ensemble,
     final_signal: finalSignal,
-    final_confidence: judgeResult.trace.confidence,
-    recommended_size_usdc: judgeResult.trace.recommended_size_usdc,
+    final_confidence: ensemble.aggregate.confidence,
+    recommended_size_usdc: ensemble.aggregate.recommended_size_usdc,
     total_token_usage: {
       ...totalUsage,
       estimated_cost_usd: Math.round(runningCost * 10_000) / 10_000,

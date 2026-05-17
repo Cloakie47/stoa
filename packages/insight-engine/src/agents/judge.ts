@@ -1,183 +1,160 @@
 /**
- * Judge agent — Sonnet 4.6 with adaptive thinking.
+ * Judge agent — multi-model ensemble of Haiku 4.5, Sonnet 4.6, and Opus 4.7.
  *
- * Receives the four specialist AgentTraces, reasons explicitly about
- * agreements and disagreements, and emits a final aggregated JudgeTrace
- * containing:
- *   - the same fields as an AgentTrace (thesis, evidence, signal, ...)
- *   - disagreement_analysis: where agents disagreed and how it resolved
- *   - agent_signals: per-agent (signal, confidence) snapshot for audit
- *   - recommended_size_usdc: position size in USDC (0 if PASS)
+ * Receives the four specialist AgentTraces, reasons through the Metaculus
+ * forecasting template (outside view → status quo → scenarios → triggers),
+ * and emits a JudgeTrace with a calibrated point estimate + 80% CI.
  *
- * Why Sonnet (not Haiku): the Judge is the highest-leverage call in the
- * system. Bad aggregation undermines the value of every specialist. Sonnet's
- * stronger reasoning is worth the cost premium for one call per analysis.
+ * The ensemble runs three models in parallel via Promise.all. Aggregation:
+ *   - model_p_yes  = median across runs
+ *   - ci_low       = min ci_low across runs
+ *   - ci_high      = max ci_high across runs
+ *   - verdict      = majority vote; PASS on tie
+ *   - other fields = taken verbatim from the median run
  *
- * The Judge can return PASS if:
- *   - Agents disagree sharply with no clear majority
- *   - Aggregate confidence is too low
- *   - Multiple agents flagged PASS themselves
+ * If ensembling fails for ≥ 2 models, falls back to whatever ran successfully
+ * (or throws when zero ran). Caller can also disable ensembling via env.
  */
 
 import {
   JUDGE_TRACE_JSON_SCHEMA,
+  MODEL_HAIKU,
+  MODEL_OPUS,
   MODEL_SONNET,
+  type ModelId,
   runAgent,
   type RunAgentResult,
 } from "../claude.js";
 import type {
   AgentTrace,
+  CalibrationDomain,
+  JudgeEnsemble,
+  JudgeEnsembleRun,
   JudgeTrace,
   MarketContext,
   Signal,
 } from "../types.js";
 
-const SYSTEM_PROMPT = `You are the JUDGE in the Stoa InsightAgent multi-agent prediction-market analysis system. You receive four AgentTrace inputs from specialist agents and emit the final aggregated decision.
+const VALID_CALIBRATION_DOMAINS: readonly CalibrationDomain[] = [
+  "sports_short",
+  "sports_long",
+  "weather_short",
+  "tech_demo",
+  "politics",
+  "crypto_price",
+  "geopolitics",
+  "entertainment",
+  "long_horizon_any",
+  "other",
+];
 
-# YOUR ROLE IN THE SYSTEM
+function coerceCalibrationDomain(s: string | undefined): CalibrationDomain {
+  if (!s) return "other";
+  return (VALID_CALIBRATION_DOMAINS as readonly string[]).includes(s)
+    ? (s as CalibrationDomain)
+    : "other";
+}
 
-Four specialist agents run in parallel before you:
+const SYSTEM_PROMPT = `You are a professional prediction-market forecaster being evaluated on Brier score against human superforecasters. You are the JUDGE in the Stoa InsightAgent multi-agent system — four specialist agents have already done domain research; your job is to aggregate them into a calibrated probability and a single-sentence verdict.
+
+# YOUR INPUTS
+
+You receive four AgentTraces in the user message:
   1. News — credible reporting and primary sources
   2. Sentiment — social-media and community signal
   3. Historical — analogues from past events
   4. Market Structure — Polymarket orderbook and flow
 
-You see all four of their traces in the user message. Your output gets pinned on-chain alongside theirs as the final trace for this analysis. You are responsible for the final YES/NO/PASS signal, the final confidence number, and the recommended position size.
+You ALSO receive the current market price (market_p_yes), the time-to-resolution, and the user's bankroll. You do NOT have internet access — DO NOT try to recall news or analogues; that's what the specialists did.
 
-# YOU ARE NOT A FIFTH SPECIALIST
+# REQUIRED REASONING ORDER
 
-You are NOT supposed to come up with your own independent thesis. Your inputs are the four specialists, NOT the world. Specifically:
+Before answering you MUST work through these in this order:
 
-- DO NOT try to recall news from your training data — the News agent did that.
-- DO NOT try to recall historical analogues — the Historical agent did that.
-- DO NOT speculate about sentiment — the Sentiment agent did that.
-- DO NOT have a "view" on the market structure — the Market Structure agent did that.
+(a) **Outside view** — the historical base rate for this category of event, treating the question as a member of a reference class. State the reference class explicitly and the base rate as a number. Examples:
+    - "Sitting US presidents win re-election ~70% of the time (8 of last 11)"
+    - "First-time launches of new rocket hardware succeed ~50% on attempt 1"
+    - "Songs holding #1 on Billboard 200 in week N hold week N+1 about 35% of the time"
+    The outside view IS your prior before looking at case specifics.
 
-Your job is META-REASONING. You read the four traces, identify where they agree, identify where they disagree, weigh their credibility for this specific question, and produce a calibrated aggregate.
+(b) **Status-quo outcome** — what happens if nothing changes between now and resolution. Most prediction markets resolve to the status quo because the world changes slowly. Name the status-quo outcome explicitly ("YES" or "NO") and weight your final estimate toward it.
 
-# YOUR OUTPUT FORMAT (extends AgentTrace)
+(c) **One specific NO scenario** — a concrete story for how this resolves NO, with rough probability weight. Be specific ("Court rules X by date Y"), not generic ("something bad happens").
 
-\`\`\`
-{
-  "thesis":              "1-3 sentence claim — the aggregate view across agents",
-  "evidence": [
-    { "source": "News agent",            "quote": "[1 line summary of their thesis + signal + confidence]" },
-    { "source": "Sentiment agent",       "quote": "..." },
-    { "source": "Historical agent",      "quote": "..." },
-    { "source": "Market Structure agent","quote": "..." }
-  ],
-  "counter_arguments":   "the strongest case AGAINST your aggregate thesis from across the four traces",
-  "confidence":          0-100,
-  "signal":              "YES" | "NO" | "PASS",       // advisory — orchestrator overrides
-  "reasoning":           "your aggregation logic, 4-10 sentences. INCLUDE an edge analysis: model_p_yes vs market_p_yes, which side has positive EV, and how big the edge is.",
-  "disagreement_analysis": "explicit reasoning about where the agents disagreed and how you resolved it",
-  "agent_signals": {
-    "news":             { "signal": "YES", "confidence": 70 },
-    "sentiment":        { "signal": "NO",  "confidence": 55 },
-    "historical":       { "signal": "YES", "confidence": 60 },
-    "market_structure": { "signal": "YES", "confidence": 45 }
-  },
-  "model_probability_yes": 0.62,                       // YOUR PROBABILITY of YES, in [0,1]. THIS DRIVES SIZING.
-  "recommended_size_usdc": 0.0                          // ignored by orchestrator; emit 0 here, sizing is computed from probability + price
-}
-\`\`\`
+(d) **One specific YES scenario** — same, for YES.
 
-Output as the FINAL text block, raw JSON, no markdown fences.
+(e) **Three to five re-evaluation triggers** — concrete events or price thresholds that would change your call. Include at least one mechanical price stop (e.g., "YES drops below $0.83" or "NO touches $0.30"). These let the user know when to /re-analyze.
 
-# CRITICAL: HOW SIZING ACTUALLY WORKS
+# OUTPUT FORMAT — STRICT JSON SCHEMA
 
-You output \`model_probability_yes\` — your aggregated probability that the YES outcome wins, in [0,1]. **The orchestrator (in code) computes the final signal and position size from this value vs the current market_p_yes you'll be given in the user message.**
+You output JSON with all the following fields. (Schema validation will catch missing fields — emit them all.)
 
-The formula the orchestrator runs (you do NOT compute this; you only output \`model_probability_yes\`):
+  thesis                — 1-3 sentence claim, the aggregate view.
+  evidence              — array of {source, quote} drawn from the four traces (not from your training data).
+  counter_arguments     — the strongest case AGAINST your thesis from the traces.
+  confidence            — 0-100, your META-uncertainty about model_probability_yes.
+  signal                — "YES" | "NO" | "PASS"; advisory, orchestrator overrides.
+  reasoning             — 4-10 sentences walking through your aggregation: which agents you weighted, how outside view + status quo + scenarios combined into your point estimate.
+  disagreement_analysis — explicit reasoning about where the 4 agents disagreed and how you resolved it.
+  agent_signals         — {news,sentiment,historical,market_structure: {signal, confidence}} snapshot.
+  model_probability_yes — your final aggregated P(YES) in [0,1]. AFTER outside-view → status-quo → inside-view adjustment. This is THE number that drives sizing.
+  ci_low                — 10th-percentile estimate, in [0,1].
+  ci_high               — 90th-percentile estimate, in [0,1]. Spread should reflect your real uncertainty. Wider for low-information markets.
+  verdict               — "BUY_YES" | "BUY_NO" | "PASS". Advisory.
+  edge_bps              — signed integer = (model_probability_yes - market_p_yes) * 10000.
+  outside_view_p_yes    — your base rate in [0,1], BEFORE any inside-view adjustment.
+  inside_view_adjustment — signed = (post-inside-view) - outside_view_p_yes; how far case specifics moved you. Stay MODEST — base rates dominate. Don't shift by more than 0.25 unless evidence is exceptional.
+  status_quo_outcome    — "YES" or "NO".
+  no_scenario           — {description, weight} of your specific NO story.
+  yes_scenario          — {description, weight} of your specific YES story.
+  risk_decomposition    — array of {scenario, probability} buckets summing approximately to 1. 2-5 entries.
+  reevaluation_triggers — array of 3-5 specific strings (events or price levels).
+  stability             — "stable" or "decays_<X>_bps_per_day" where X is your decay estimate.
+  calibration_adjustment — {domain, reason}. Pick one domain:
+                            sports_short | sports_long | weather_short | tech_demo |
+                            politics | crypto_price | geopolitics | entertainment |
+                            long_horizon_any | other. The reason is one sentence.
+                            (A deterministic policy applies the actual numerical
+                             adjustment in code; you just classify.)
+  recommended_size_usdc — 0; sizing is computed by the orchestrator.
 
-\`\`\`
-edge_yes = model_p_yes - market_p_yes
-edge_no  = market_p_yes - model_p_yes        # = -edge_yes
-
-If edge_yes > 0:  side = YES, kelly = edge_yes / (1 - market_p_yes)
-If edge_no  > 0:  side = NO,  kelly = edge_no / market_p_yes
-Otherwise:        side = PASS
-
-size = balance × min(kelly × 0.25, 0.20)     # quarter-Kelly, 20% balance cap
-If size < $1:     side = PASS                 # dust threshold
-\`\`\`
-
-**WHAT THIS MEANS FOR YOU:**
-
-1. **Your \`signal\` field is advisory.** The orchestrator will override it if your probability + market price implies the OPPOSITE side. Example: you say "signal: NO" but emit model_probability_yes = 0.32, and the market is at 5.5¢ (market_p_yes = 0.055). Then edge_yes = +0.265 → orchestrator overrides to YES because YES is the trade with positive expected value. So before you emit, sanity-check: does your probability match your signal vs the market price?
-
-2. **Don't aim your probability at where you think the answer "should" be.** Aim it at where YOU think the answer actually is, based on what the four specialists told you. The market may be way off — that's how positive-EV bets exist.
-
-3. **Calibrate carefully.** A probability of 0.62 means "if I saw a thousand markets identical to this one, I'd expect about 620 to resolve YES." Don't say 0.95 unless you'd literally bet at 19-to-1 odds against. Don't say 0.50 just because you're uncertain — uncertainty about probability IS uncertainty in the estimate, not a default to 50/50.
-
-4. **The size you output is ignored.** Emit 0.0 there if you want. The size comes from the formula.
-
-# HOW TO AGGREGATE
-
-1. **Read all four traces.** Note each one's signal + confidence.
-
-2. **Check signal alignment:**
-   - 4/4 same signal → strong consensus.
-   - 3/4 same → moderate consensus, the dissenter is informative — explain why it dissents in disagreement_analysis.
-   - 2/2 split → real disagreement; bias toward PASS unless one side is clearly more credible for this question.
-   - All PASS → PASS.
-
-3. **Weight agents by domain fit:**
-   - For event-driven questions (election outcome, court ruling, regulatory approval): News and Historical carry more weight; Sentiment and Market Structure are tiebreakers.
-   - For market-sentiment questions (will crypto X rally, will stock Y close above Z): Market Structure and Sentiment carry more weight; News is supporting.
-   - For technological-progress questions (will product X ship by Y date): Historical and News carry more weight.
-   - DO NOT use these as rigid rules — use judgment. Sometimes Sentiment catches what News missed, etc.
-
-4. **Look at evidence quality, not just confidence number:**
-   - An agent with 80 confidence citing 3 first-tier sources is worth more than an agent with 80 confidence citing 1 weak source.
-   - Penalize agents whose counter_arguments field is weak — it suggests poor calibration.
-
-5. **Compute aggregate confidence** (0-100):
-   - Start with the confidence-weighted average of agents that share the majority signal.
-   - Subtract for unresolved disagreement (e.g., -10 to -20 if one agent dissents firmly).
-   - Cap at 95 unless 4/4 agree at high confidence with overwhelming evidence.
-   - Confidence is your meta-uncertainty about model_probability_yes, NOT a position-size driver.
-
-6. **Output \`model_probability_yes\` (in [0, 1]):**
-
-   This is the ONE number that decides the trade. The orchestrator computes edge vs market price and sizes accordingly (quarter-Kelly, 20% cap, $1 dust floor). Do NOT compute position size yourself — emit 0 for recommended_size_usdc.
-
-   Examples of calibrated probabilities:
-   - A clear consensus, all four agents agreeing strongly, evidence is unambiguous → 0.85 ± 0.10
-   - Three of four agents agreeing, one moderate dissent → 0.65 ± 0.10
-   - Two/two split with one side better-supported → 0.55 ± 0.10
-   - Highly uncertain, evidence weak in all directions → stay near 0.5 (and your confidence should be low)
-   - News and Market Structure strongly say NO, but the question is binary → maybe 0.15-0.25 (NOT 0.05; only go that low if you'd bet at 19-to-1)
-
-# DISAGREEMENT_ANALYSIS FIELD
-
-This is the heart of your output. Be concrete:
-
-Bad: "The agents had mixed views."
-
-Good: "News and Historical both leaned YES (75 and 65 confidence) citing the deal announcement and a base rate of 70% for similar mergers closing. Sentiment leaned NO (50 confidence) but cited X posts that primarily reflect speculative bear positioning rather than substantive concern. Market Structure was PASS (40 confidence) on thin orderbook. I weighted News and Historical higher because the question turns on a regulatory decision, where credible reporting and base rates dominate, and discounted Sentiment as noisy crowd reaction."
-
-# WHEN PASS IS THE RIGHT OUTCOME
-
-PASS happens automatically (orchestrator-side) when:
-- Your model_probability_yes ≈ market_p_yes (no edge → no trade)
-- The Kelly-derived size comes out below $1 (tiny edge — not worth the bet)
-
-You can also nudge toward PASS by reporting a probability very close to the market price when you genuinely don't think you have an edge. But don't artificially do this — if News says NO with strong evidence and the market is at 80¢ YES, your probability should be e.g. 0.30, not 0.79. Let the orchestrator decide whether the edge is big enough to trade.
-
-# WHAT NOT TO DO
-
-- DO NOT search the web; you have no tools.
-- DO NOT invent agent traces or add evidence the specialists didn't provide.
-- DO NOT try to compute the Kelly fraction or size yourself — that's the orchestrator's job. Just emit model_probability_yes.
-- DO NOT cluster all your probabilities near 0.5 because you're hedging — that wastes the analysis. If the evidence points somewhere, COMMIT to a probability.
-- DO NOT cluster all your probabilities near the market price either — that's the opposite failure (overweighting the market as a prior). Aggregate the specialists; let the price drop out of your reasoning ONLY when their evidence is genuinely weak.
+Output the FINAL text block as raw JSON, no markdown fences, no prose.
 
 # REMEMBER
 
-Your trace gets pinned on-chain. The audit trail captures (model_probability_yes, market_price_yes, edge, kelly, size) — readers will see whether your probability was well-calibrated against the actual outcome. Be honest, be specific, commit to a probability.
+- Good forecasters START from base rates and adjust MODESTLY. They don't reason the case from scratch.
+- The world changes slowly. Status-quo outcomes win more than people expect.
+- Set WIDE confidence intervals when you have weak evidence. Narrow CIs only when 4/4 agents agree with strong sources.
+- Commit to a probability — not vague language. 0.62 is better than "leaning YES."
+- Your trace is pinned on-chain. Auditors will check whether your probabilities are well-calibrated against actual outcomes. Be honest, be specific.
 
-You have one user message coming. It contains the four agent traces, the user balance, and the market context — including market_p_yes. Reason through aggregation, then emit the JudgeTrace JSON.`;
+# ORCHESTRATOR CONTRACT (load-bearing, do not violate)
+
+The orchestrator computes the final signal and position size from your \`model_probability_yes\` (NOT your \`verdict\`):
+
+  edge_yes = model_p_yes - market_p_yes
+  edge_no  = -edge_yes
+  If |edge| < 0.04:                     side = PASS  (edge below 4¢ minimum)
+  Else if edge_yes > 0:                 side = YES,  kelly = edge_yes / (1 - market_p_yes)
+       edge_no  > 0:                    side = NO,   kelly = edge_no  / market_p_yes
+  size = balance × min(kelly × 0.25, 0.20)         (quarter-Kelly, 20% cap)
+  If size < $0.05:                      side = PASS  (dust)
+
+So:
+- Your \`verdict\` field is advisory; the orchestrator overrides it.
+- Your sizing field is ignored entirely; emit 0.
+- The ONE field that drives the trade is \`model_probability_yes\`. Calibrate carefully — 0.62 means "if I saw 1000 markets like this, I'd expect ~620 YES." Don't anchor to the market price.
+
+# AGGREGATION HEURISTIC
+
+When weighting the four specialists for THIS question:
+- Event-driven (rulings, approvals, election outcomes): News + Historical dominant; Sentiment + Market Structure tiebreak.
+- Sentiment-driven (crypto rallies, sports vibes, viral moments): Sentiment + Market Structure dominant; News supporting.
+- Tech-progress (product ships by date): Historical + News dominant.
+
+Pay more attention to evidence QUALITY than to confidence numbers. An agent citing 3 tier-1 sources at 70 confidence beats an agent at 90 confidence with 1 weak source.
+
+You have one user message coming with the four traces, balance, market price. Reason through outside view → status quo → scenarios → triggers, then emit the JudgeTrace JSON.`;
 
 export interface JudgeInput {
   context: MarketContext;
@@ -185,12 +162,24 @@ export interface JudgeInput {
   agentTraces: AgentTrace[];
 }
 
+/** Models that participate in the default ensemble. Ordered by reasoning depth. */
+export const ENSEMBLE_MODELS: ModelId[] = [MODEL_OPUS, MODEL_SONNET, MODEL_HAIKU];
+
+/**
+ * Single-model Judge call. Builds the JudgeTrace with all Metaculus-template
+ * fields and applies the Kelly formula. Caller is responsible for any
+ * cross-run aggregation.
+ *
+ * `model_p_yes` here is the *raw* probability the model emitted — calibration
+ * policy is applied LATER, by the orchestrator (bot-core/calibration.ts).
+ */
 export async function runJudgeAgent(
   input: JudgeInput,
+  model: ModelId = MODEL_SONNET,
 ): Promise<{ trace: JudgeTrace; cost_usd: number }> {
   const userMessage = renderUserMessage(input);
   const result: RunAgentResult = await runAgent({
-    model: MODEL_SONNET,
+    model,
     systemPrompt: SYSTEM_PROMPT,
     userMessage,
     outputSchema: JUDGE_TRACE_JSON_SCHEMA,
@@ -200,46 +189,229 @@ export async function runJudgeAgent(
     adaptiveThinking: true,
   });
 
-  // The Judge model outputs a model_probability_yes alongside its own
-  // signal/size. We trust the probability estimate (that's the genuinely
-  // useful aggregation) but OVERRIDE the signal and size using the Kelly
-  // formula vs market price — the model isn't allowed to recommend
-  // negative-EV trades.
-  const modelPYes = clampProb(result.parsed.model_probability_yes as number);
+  const p = result.parsed;
+  const modelPYes = clampProb(p.model_probability_yes as number) ?? 0.5;
+  const ciLow = clampProb(p.ci_low as number | undefined) ?? Math.max(0, modelPYes - 0.15);
+  const ciHigh = clampProb(p.ci_high as number | undefined) ?? Math.min(1, modelPYes + 0.15);
+  const outsideViewPYes =
+    clampProb(p.outside_view_p_yes as number | undefined) ?? modelPYes;
+  const insideAdj =
+    typeof p.inside_view_adjustment === "number"
+      ? p.inside_view_adjustment
+      : modelPYes - outsideViewPYes;
+
   const marketPYes = input.context.current_yes_price;
   const rec = computeJudgeRecommendation({
-    model_p_yes: modelPYes ?? 0.5,
+    model_p_yes: modelPYes,
     market_p_yes: marketPYes ?? 0.5,
     balance: input.userBalanceUsdc,
   });
 
+  // STRUCTURED LOGGING — readable in Railway logs; one line per gate so
+  // operator can diff between runs.
+  console.log(
+    `[judge:${model}] p_yes=${modelPYes.toFixed(4)} market=${(marketPYes ?? 0.5).toFixed(4)} edge=${rec.edge_yes.toFixed(4)} kelly=${rec.kelly_fraction.toFixed(4)} bal=$${input.userBalanceUsdc.toFixed(2)} size=$${rec.size_usdc.toFixed(2)} signal=${rec.signal} reason=${JSON.stringify(rec.reason)}`,
+  );
+
+  const calRaw = p.calibration_adjustment as
+    | { domain?: string; reason?: string }
+    | undefined;
   const trace: JudgeTrace = {
     agent: "judge",
     market_url: input.context.url,
     market_question: input.context.question,
-    thesis: result.parsed.thesis as string,
-    evidence: result.parsed.evidence as JudgeTrace["evidence"],
-    counter_arguments: result.parsed.counter_arguments as string,
-    confidence: result.parsed.confidence as number,
-    // Signal is DERIVED from edge, not from the model's claim. Critical:
-    // if the model said YES but edge_no > 0, we surface NO; if neither
-    // edge is positive, we PASS.
+    thesis: (p.thesis as string) ?? "",
+    evidence: (p.evidence as JudgeTrace["evidence"]) ?? [],
+    counter_arguments: (p.counter_arguments as string) ?? "",
+    confidence: (p.confidence as number) ?? 50,
     signal: rec.signal,
-    reasoning: result.parsed.reasoning as string,
-    disagreement_analysis: result.parsed.disagreement_analysis as string,
-    agent_signals: result.parsed.agent_signals as JudgeTrace["agent_signals"],
-    model_probability_yes: modelPYes ?? 0.5,
+    reasoning: (p.reasoning as string) ?? "",
+    disagreement_analysis: (p.disagreement_analysis as string) ?? "",
+    agent_signals: (p.agent_signals as JudgeTrace["agent_signals"]) ?? {
+      news: { signal: "PASS", confidence: 0 },
+      sentiment: { signal: "PASS", confidence: 0 },
+      historical: { signal: "PASS", confidence: 0 },
+      market_structure: { signal: "PASS", confidence: 0 },
+    },
+    model_probability_yes: modelPYes,
     market_price_yes: marketPYes ?? 0.5,
-    edge_yes: Math.round(rec.edge_yes * 10_000) / 10_000,
-    edge_no: Math.round(rec.edge_no * 10_000) / 10_000,
-    kelly_fraction: Math.round(rec.kelly_fraction * 10_000) / 10_000,
+    edge_yes: round4(rec.edge_yes),
+    edge_no: round4(rec.edge_no),
+    kelly_fraction: round4(rec.kelly_fraction),
     recommended_size_usdc: rec.size_usdc,
+    ci_low: round4(ciLow),
+    ci_high: round4(ciHigh),
+    outside_view_p_yes: round4(outsideViewPYes),
+    inside_view_adjustment: round4(insideAdj),
+    status_quo_outcome: ((p.status_quo_outcome as string) === "YES"
+      ? "YES"
+      : "NO") as "YES" | "NO",
+    no_scenario: (p.no_scenario as JudgeTrace["no_scenario"]) ?? {
+      description: "(no scenario emitted)",
+      weight: 0.5,
+    },
+    yes_scenario: (p.yes_scenario as JudgeTrace["yes_scenario"]) ?? {
+      description: "(no scenario emitted)",
+      weight: 0.5,
+    },
+    risk_decomposition:
+      (p.risk_decomposition as JudgeTrace["risk_decomposition"]) ?? [],
+    reevaluation_triggers:
+      (p.reevaluation_triggers as string[]) ?? [],
+    stability: (p.stability as string) ?? "stable",
+    recommendation_reason: rec.reason,
     timestamp: new Date().toISOString(),
-    model: MODEL_SONNET,
+    model,
     token_usage: result.usage,
   };
+  if (calRaw?.domain) {
+    // Stub — final calibration record is filled in by bot-core after policy.
+    trace.calibration_adjustment = {
+      domain: coerceCalibrationDomain(calRaw.domain),
+      adjustment_applied: 0,
+      reason: calRaw.reason ?? "",
+      policy_version: "calibration-v1.0-2026-05-17",
+      raw_model_p_yes: modelPYes,
+    };
+  }
 
   return { trace, cost_usd: result.cost_usd };
+}
+
+function round4(n: number): number {
+  return Math.round(n * 10_000) / 10_000;
+}
+
+/**
+ * Multi-model ensemble: runs `models` in parallel, aggregates via median +
+ * majority vote. Falls back to whatever runs succeeded; throws only when
+ * ALL runs fail.
+ *
+ * Set `disableEnsemble: true` (or env STOA_DISABLE_ENSEMBLE=1) to force a
+ * single-model run with the first entry of `models`. Used when budget /
+ * latency forbids 3-model.
+ */
+export async function runJudgeEnsemble(
+  input: JudgeInput,
+  opts: { models?: ModelId[]; disableEnsemble?: boolean } = {},
+): Promise<JudgeEnsemble> {
+  const envDisabled = process.env.STOA_DISABLE_ENSEMBLE === "1";
+  const disabled = opts.disableEnsemble ?? envDisabled;
+  const models = disabled
+    ? [opts.models?.[0] ?? MODEL_SONNET]
+    : (opts.models ?? ENSEMBLE_MODELS);
+
+  const settled = await Promise.allSettled(
+    models.map((m) => runJudgeAgent(input, m)),
+  );
+
+  const runs: JudgeEnsembleRun[] = [];
+  for (const [i, r] of settled.entries()) {
+    const m = models[i]!;
+    if (r.status === "fulfilled") {
+      runs.push({ model: m, trace: r.value.trace, cost_usd: r.value.cost_usd });
+    } else {
+      console.warn(
+        `[judge-ensemble] ${m} run failed: ${(r.reason as Error)?.message ?? r.reason}`,
+      );
+    }
+  }
+  if (runs.length === 0) {
+    throw new Error("All Judge ensemble runs failed.");
+  }
+
+  const aggregate = aggregateEnsembleRuns(runs, input);
+  const agreement = computeAgreement(runs);
+  const totalCost = runs.reduce((s, r) => s + r.cost_usd, 0);
+
+  console.log(
+    `[judge-ensemble] models=[${models.join(",")}] succeeded=${runs.length}/${models.length} ` +
+      `agreement=${(agreement * 100).toFixed(0)}% aggregate.p_yes=${aggregate.model_probability_yes.toFixed(4)} ` +
+      `aggregate.signal=${aggregate.signal} cost=$${totalCost.toFixed(4)}`,
+  );
+
+  return {
+    aggregate,
+    runs,
+    agreement,
+    fallback_single_model: runs.length === 1,
+    total_cost_usd: totalCost,
+  };
+}
+
+/** Median of an array of numbers. Returns 0 for empty array. */
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const sorted = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1]! + sorted[mid]!) / 2
+    : sorted[mid]!;
+}
+
+function aggregateEnsembleRuns(
+  runs: JudgeEnsembleRun[],
+  input: JudgeInput,
+): JudgeTrace {
+  // Median of model_p_yes
+  const ps = runs.map((r) => r.trace.model_probability_yes);
+  const medP = median(ps);
+  // Find the run nearest to the median — use it as the source of all
+  // non-numeric fields (thesis, reasoning, scenarios, …). Numeric/aggregated
+  // fields below override what comes from this run.
+  const seed = [...runs].sort(
+    (a, b) =>
+      Math.abs(a.trace.model_probability_yes - medP) -
+      Math.abs(b.trace.model_probability_yes - medP),
+  )[0]!;
+
+  // CI: min of low, max of high — widens to reflect cross-model disagreement.
+  const ciLow = Math.min(...runs.map((r) => r.trace.ci_low));
+  const ciHigh = Math.max(...runs.map((r) => r.trace.ci_high));
+
+  // Majority verdict (advisory; recomputed by Kelly below).
+  const verdicts = runs.map((r) => r.trace.signal);
+  const counts: Record<string, number> = {};
+  for (const v of verdicts) counts[v] = (counts[v] ?? 0) + 1;
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const advisoryVerdict =
+    top.length > 1 && top[0]![1] === top[1]![1] ? "PASS" : (top[0]![0] as Signal);
+
+  // Recompute Kelly with the aggregated probability.
+  const marketPYes = input.context.current_yes_price ?? 0.5;
+  const rec = computeJudgeRecommendation({
+    model_p_yes: medP,
+    market_p_yes: marketPYes,
+    balance: input.userBalanceUsdc,
+  });
+
+  // advisoryVerdict is preserved in JudgeEnsemble.agreement+runs, not on the aggregate.
+  void advisoryVerdict;
+
+  return {
+    ...seed.trace,
+    model: `ensemble(${runs.map((r) => r.model).join(",")})`,
+    model_probability_yes: medP,
+    ci_low: round4(ciLow),
+    ci_high: round4(ciHigh),
+    market_price_yes: marketPYes,
+    edge_yes: round4(rec.edge_yes),
+    edge_no: round4(rec.edge_no),
+    kelly_fraction: round4(rec.kelly_fraction),
+    recommended_size_usdc: rec.size_usdc,
+    signal: rec.signal, // orchestrator-authoritative
+    recommendation_reason: rec.reason,
+    // token_usage stays as the seed's — full per-run usage is preserved in `runs[].trace.token_usage`.
+  };
+}
+
+function computeAgreement(runs: JudgeEnsembleRun[]): number {
+  if (runs.length <= 1) return 1;
+  const verdicts = runs.map((r) => r.trace.signal);
+  const counts: Record<string, number> = {};
+  for (const v of verdicts) counts[v] = (counts[v] ?? 0) + 1;
+  const maxCount = Math.max(...Object.values(counts));
+  return maxCount / runs.length;
 }
 
 function clampProb(p: number | undefined): number | undefined {
@@ -265,7 +437,23 @@ export interface JudgeRecommendation {
   edge_no: number;
   /** Full Kelly fraction for the winning side, in [0,1]. 0 on PASS. */
   kelly_fraction: number;
+  /**
+   * Human-readable explanation of the recommendation. Always set; the
+   * formatter shows this to the user when signal is PASS so the user
+   * knows whether it's edge / dust / degenerate-input.
+   */
+  reason: string;
 }
+
+/** Minimum absolute edge (in probability units) to consider a trade.
+ *  4¢ — below this the market is essentially in agreement with the model
+ *  and quarter-Kelly sizing is mostly noise. */
+export const MIN_EDGE_FOR_TRADE = 0.04;
+
+/** Below this dollar size we PASS — the trade isn't worth the round-trip
+ *  fee. Lowered from $1 to $0.05 so small balances with real edge still
+ *  get a recommendation. */
+export const DUST_SIZE_USD = 0.05;
 
 /**
  * Market-price-aware sizing. Replaces the old confidence-band heuristic.
@@ -273,14 +461,15 @@ export interface JudgeRecommendation {
  * Decision rule:
  *   1. Compute edge_yes = model_p_yes - market_p_yes.
  *      edge_no is the negation. At most one is positive.
- *   2. If edge_yes > 0:  buy YES, kelly = edge_yes / (1 - market_p_yes)
+ *   2. If |edge| < MIN_EDGE_FOR_TRADE (4¢): PASS with "edge too small" reason.
+ *   3. If edge_yes > 0:  buy YES, kelly = edge_yes / (1 - market_p_yes)
  *      If edge_no  > 0:  buy NO,  kelly = edge_no / market_p_yes
  *      Else:             PASS (zero or non-positive edge both ways)
- *   3. Size = balance × min(kelly × 0.25, 0.20)
+ *   4. Size = balance × min(kelly × 0.25, 0.20)
  *      (quarter-Kelly with a 20% concentration cap)
- *   4. If size < $1: PASS (dust threshold — don't bother)
+ *   5. If size < DUST_SIZE_USD ($0.05): PASS with "size below dust" reason.
  *
- * Degenerate inputs (probabilities outside (0,1)) → PASS.
+ * Degenerate inputs (probabilities outside (0,1)) → PASS with "invalid input".
  *
  * EXPORTED so unit tests can hit it directly without running the full
  * Judge LLM call.
@@ -291,27 +480,47 @@ export function computeJudgeRecommendation(args: {
   balance: number;
 }): JudgeRecommendation {
   const { model_p_yes, market_p_yes, balance } = args;
-  const empty: JudgeRecommendation = {
+  const invalid = (reason: string): JudgeRecommendation => ({
     signal: "PASS",
     size_usdc: 0,
     edge_yes: 0,
     edge_no: 0,
     kelly_fraction: 0,
-  };
+    reason,
+  });
   if (
     !Number.isFinite(model_p_yes) ||
     model_p_yes <= 0 ||
     model_p_yes >= 1 ||
     !Number.isFinite(market_p_yes) ||
     market_p_yes <= 0 ||
-    market_p_yes >= 1 ||
-    !Number.isFinite(balance) ||
-    balance <= 0
+    market_p_yes >= 1
   ) {
-    return empty;
+    return invalid(
+      `Degenerate probability inputs (model=${model_p_yes}, market=${market_p_yes}); cannot compute edge.`,
+    );
   }
+  if (!Number.isFinite(balance) || balance <= 0) {
+    return invalid(
+      `Bankroll is zero. Fund your Stoa wallet (Arc or Base) before /analyze recommends a size.`,
+    );
+  }
+
   const edge_yes = model_p_yes - market_p_yes;
   const edge_no = -edge_yes;
+  const absEdge = Math.abs(edge_yes);
+
+  if (absEdge < MIN_EDGE_FOR_TRADE) {
+    return {
+      signal: "PASS",
+      size_usdc: 0,
+      edge_yes,
+      edge_no,
+      kelly_fraction: 0,
+      reason: `Edge ${(absEdge * 100).toFixed(1)}¢ is below the ${(MIN_EDGE_FOR_TRADE * 100).toFixed(0)}¢ minimum. Model and market essentially agree — wait for better odds.`,
+    };
+  }
+
   let signal: Signal;
   let kelly: number;
   if (edge_yes > 0) {
@@ -321,17 +530,26 @@ export function computeJudgeRecommendation(args: {
     signal = "NO";
     kelly = edge_no / market_p_yes;
   } else {
-    return { ...empty, edge_yes, edge_no };
+    // edge_yes is exactly zero (rare; caught by the MIN_EDGE_FOR_TRADE check above).
+    return {
+      signal: "PASS",
+      size_usdc: 0,
+      edge_yes,
+      edge_no,
+      kelly_fraction: 0,
+      reason: "No edge in either direction.",
+    };
   }
   const fraction = Math.min(kelly * 0.25, 0.2);
   const size = Math.round(balance * fraction * 100) / 100;
-  if (size < 1.0) {
+  if (size < DUST_SIZE_USD) {
     return {
       signal: "PASS",
       size_usdc: 0,
       edge_yes,
       edge_no,
       kelly_fraction: kelly,
+      reason: `Quarter-Kelly size $${size.toFixed(2)} is below the $${DUST_SIZE_USD.toFixed(2)} dust threshold (bankroll $${balance.toFixed(2)}, kelly ${(kelly * 100).toFixed(1)}%). Fund more or wait for a wider edge.`,
     };
   }
   return {
@@ -340,6 +558,7 @@ export function computeJudgeRecommendation(args: {
     edge_yes,
     edge_no,
     kelly_fraction: kelly,
+    reason: `Edge ${(absEdge * 100).toFixed(1)}¢ × quarter-Kelly = $${size.toFixed(2)} (${((size / balance) * 100).toFixed(1)}% of $${balance.toFixed(2)} bankroll).`,
   };
 }
 

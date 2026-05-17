@@ -13,7 +13,7 @@
  * simulator; HTTP-proxied via /internal endpoints when called from the
  * Railway analyzer service).
  */
-import { computeKellyFraction } from "@stoa/insight-engine";
+import type { FullTrace, JudgeTrace } from "@stoa/insight-engine";
 
 import type { BotCoreConfig } from "./config.js";
 import { feeAnalyzeMicros, feeConfirmMicros } from "./config.js";
@@ -82,11 +82,20 @@ export async function runAnalyzePipeline(
       );
     }
 
-    const baseBalForKelly = await readUsdcBalanceBase(cfg, wallet.address)
+    // Bankroll for Kelly sizing: use max(Arc, Base) — a user funded only on
+    // Arc shouldn't get silently sized to 0 because their Base balance is 0.
+    // The actual trade venue is Base (Limitless), but with Limitless mocked
+    // in v0 the recommendation is hackathon-side anyway.
+    const arcBalUsd = Number(arcBal) / 1_000_000;
+    const baseBalUsd = await readUsdcBalanceBase(cfg, wallet.address)
       .then((b) => Number(b) / 1_000_000)
       .catch(() => 0);
+    const bankrollUsd = Math.max(arcBalUsd, baseBalUsd);
+    console.log(
+      `[analyze:${requestId}] arc=$${arcBalUsd.toFixed(2)} base=$${baseBalUsd.toFixed(2)} bankroll=$${bankrollUsd.toFixed(2)}`,
+    );
 
-    const analysis = await runFullAnalysis(cfg, marketUrl, baseBalForKelly);
+    const analysis = await runFullAnalysis(cfg, marketUrl, bankrollUsd);
 
     const feeId = await db.logFeeChargeStart(
       telegramUserId,
@@ -141,35 +150,14 @@ export async function runAnalyzePipeline(
       JSON.stringify(analysis.trace),
     );
 
-    const yesPrice = judge.market_price_yes ?? 0;
-    const kellyFraction = computeKellyFraction({
-      signal: judge.signal,
-      subjective_probability: judge.confidence,
-      current_yes_price: yesPrice,
+    const message = formatAnalyzeMessage({
+      trace: analysis.trace,
+      txHash,
+      ipfsCid: analysis.ipfs_cid,
+      orderId: order_id,
+      bankrollUsd,
+      requestId,
     });
-
-    const tag =
-      judge.signal === "YES"
-        ? "📈 YES"
-        : judge.signal === "NO"
-          ? "📉 NO"
-          : "⏸ PASS";
-
-    const ipfsLink = analysis.ipfs_cid ? `\nIPFS: \`${analysis.ipfs_cid}\`` : "";
-
-    const message =
-      `*Analysis complete* — $0.10 charged, split 70/20/10 atomic on Arc.\n\n` +
-      `${tag} (confidence ${(judge.confidence * 100).toFixed(0)}%)\n\n` +
-      `${judge.thesis ?? "(no thesis)"}\n\n` +
-      `*Recommended size:* $${judge.recommended_size_usdc.toFixed(2)} ` +
-      `(Kelly ${(kellyFraction * 100).toFixed(1)}% of bankroll)\n\n` +
-      `*On-chain artifacts*\n` +
-      `Arc tx: [${shortHash(txHash)}](https://testnet.arcscan.app/tx/${txHash})${ipfsLink}\n` +
-      `Trace hash: \`${shortHash(analysis.trace_hash)}\`\n\n` +
-      `*To execute:* \`/confirm ${order_id}\`\n` +
-      `($0.20 execution fee + the trade itself on Base)\n\n` +
-      `_Request \`${requestId}\` complete._`;
-
     await sendTelegramMessage(cfg.TELEGRAM_BOT_TOKEN, chatId, message);
 
     return {
@@ -309,4 +297,158 @@ export async function runConfirmPipeline(
     );
     return null;
   }
+}
+
+// ── /analyze message formatter ────────────────────────────────────────────
+
+interface FormatAnalyzeArgs {
+  trace: FullTrace;
+  txHash: Hex;
+  ipfsCid: string | null;
+  orderId: string;
+  bankrollUsd: number;
+  requestId: string;
+}
+
+/**
+ * Render the full Metaculus-template analyze result for Telegram. Markdown
+ * format; `sendTelegramMessage` retries as plain text on Markdown parse
+ * failures so a stray backtick/asterisk doesn't kill the response.
+ */
+function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
+  const { trace, txHash, ipfsCid, orderId, bankrollUsd, requestId } = args;
+  const j: JudgeTrace = trace.judge_trace;
+  const yes = clamp01(j.market_price_yes);
+  const no = 1 - yes;
+  const pYes = clamp01(j.model_probability_yes);
+  const ciLow = clamp01(j.ci_low ?? Math.max(0, pYes - 0.15));
+  const ciHigh = clamp01(j.ci_high ?? Math.min(1, pYes + 0.15));
+  const outsideView = clamp01(j.outside_view_p_yes ?? pYes);
+  const insideAdj = j.inside_view_adjustment ?? 0;
+
+  const edgeSigned =
+    j.signal === "NO" ? -Math.abs(j.edge_no) : j.edge_yes;
+  const edgeCents = Math.round(edgeSigned * 100);
+  const edgeStr = `${edgeSigned >= 0 ? "+" : ""}${edgeCents}¢`;
+
+  const verdictEmoji =
+    j.signal === "YES" ? "📈" : j.signal === "NO" ? "📉" : "⏸";
+  const verdictHeader =
+    j.signal === "PASS"
+      ? `${verdictEmoji} PASS — ${j.recommendation_reason ?? "no actionable edge"}`
+      : `${verdictEmoji} BUY_${j.signal} — ${shortHeadline(j.thesis)}`;
+
+  // ── Ensemble agreement line ──
+  const ens = trace.judge_ensemble;
+  const ensSize = ens?.runs.length ?? 1;
+  const ensAgreement = ens?.agreement ?? 1;
+  const ensembleLine =
+    ensSize > 1
+      ? `  Ensemble: ${ensSize}-model median, agreement ${(ensAgreement * 100).toFixed(0)}%`
+      : `  Ensemble: 1 model (disabled or fallback)`;
+
+  // ── Recommended action block ──
+  const sizePct = bankrollUsd > 0 ? (j.recommended_size_usdc / bankrollUsd) * 100 : 0;
+  const entryPrice = j.signal === "NO" ? no : yes;
+  let actionBlock: string;
+  if (j.signal === "PASS") {
+    actionBlock = `*Recommended action*\n  PASS — ${j.recommendation_reason ?? "no edge"}`;
+  } else {
+    actionBlock =
+      `*Recommended action*\n` +
+      `  BUY_${j.signal} @ $${entryPrice.toFixed(3)} or better\n` +
+      `  Size: $${j.recommended_size_usdc.toFixed(2)} (${sizePct.toFixed(1)}% of $${bankrollUsd.toFixed(2)} bankroll, quarter-Kelly)\n` +
+      `  Stop: exit if ${j.signal === "YES" ? `YES drops below $${(yes * 0.85).toFixed(2)}` : `NO drops below $${(no * 0.85).toFixed(2)}`}\n` +
+      `  Hold until: resolution or trigger`;
+  }
+
+  // ── Evidence ──
+  const evidenceLines =
+    j.evidence.slice(0, 4).map((e, i) => `  [${i + 1}] ${truncate(e.quote, 220)}`).join("\n") ||
+    "  (no evidence emitted)";
+
+  // ── Risk decomposition ──
+  const riskLines =
+    j.risk_decomposition.length > 0
+      ? j.risk_decomposition
+          .slice(0, 4)
+          .map(
+            (r) =>
+              `  • ${truncate(r.scenario, 100)} — ${(r.probability * 100).toFixed(0)}%`,
+          )
+          .join("\n")
+      : "  (no risk decomposition)";
+  const triggers =
+    j.reevaluation_triggers.length > 0
+      ? j.reevaluation_triggers.slice(0, 5).join("; ")
+      : "no triggers emitted";
+
+  // ── Calibration ──
+  const cal = j.calibration_adjustment;
+  const calBlock = cal
+    ? `*Calibration adjustment applied*\n` +
+      `  Domain: ${cal.domain}\n` +
+      `  Adjustment: ${cal.adjustment_applied >= 0 ? "+" : ""}${cal.adjustment_applied} bps\n` +
+      `  Reason: ${truncate(cal.reason, 240)}`
+    : `*Calibration adjustment applied*\n  Domain: other — no adjustment`;
+
+  // ── Time to resolution ──
+  const hrs = trace.judge_ensemble?.aggregate
+    ? undefined
+    : undefined;
+  void hrs;
+
+  // ── On-chain artifacts ──
+  const arcLink = `[${shortHash(txHash)}](https://testnet.arcscan.app/tx/${txHash})`;
+  const ipfsLine = ipfsCid ? `IPFS:  \`${shortHash(ipfsCid)}\`` : `IPFS:  (no pin)`;
+
+  return [
+    verdictHeader,
+    `Market: ${truncate(trace.market_question, 200)}`,
+    `Current price: YES $${yes.toFixed(3)} / NO $${no.toFixed(3)}`,
+    "",
+    `*Model estimate*`,
+    `  P(YES) = ${pYes.toFixed(3)} [80% CI: ${ciLow.toFixed(2)} – ${ciHigh.toFixed(2)}]`,
+    `  Outside view (base rate): ${outsideView.toFixed(3)}`,
+    `  Inside view adjustment: ${insideAdj >= 0 ? "+" : ""}${insideAdj.toFixed(3)}`,
+    `  Edge: ${edgeStr}`,
+    ensembleLine,
+    "",
+    actionBlock,
+    "",
+    `*Why*`,
+    evidenceLines,
+    "",
+    `*What would invalidate this call*`,
+    riskLines,
+    `  → Re-run /analyze if: ${truncate(triggers, 300)}`,
+    "",
+    calBlock,
+    "",
+    `*On-chain artifacts*`,
+    `Arc tx: ${arcLink}`,
+    ipfsLine,
+    `Trace hash: \`${shortHash(trace.trace_hash ?? "0x")}\``,
+    "",
+    j.signal === "PASS"
+      ? `_No trade to confirm. Run /analyze on a different market._`
+      : `*To execute:* \`/confirm ${orderId}\`\n($0.20 execution fee + the trade itself on Limitless)`,
+    "",
+    `_Request \`${requestId}\` — $0.10 charged, split 70/20/10 atomic on Arc._`,
+  ].join("\n");
+}
+
+function clamp01(n: number | undefined): number {
+  if (n === undefined || !Number.isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+function shortHeadline(thesis: string): string {
+  const first = thesis.split(/[.!?]/)[0] ?? thesis;
+  return truncate(first.trim(), 120);
+}
+
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "…";
 }

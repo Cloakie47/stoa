@@ -97,10 +97,10 @@ describe("computeJudgeRecommendation (Kelly-based sizing)", () => {
     expect(r.size_usdc).toBe(0);
   });
 
-  it("(e) tiny positive edge → PASS due to $1 dust threshold", () => {
-    // model_p_yes = 0.49, market_p_yes = 0.48
-    // edge_yes = 0.01, kelly = 0.01 / 0.52 = 0.0192
-    // quarter-kelly = 0.0048 → size = 100 * 0.0048 = $0.48 → dust → PASS
+  it("(e) tiny positive edge (<4¢) → PASS via MIN_EDGE_FOR_TRADE gate", () => {
+    // model_p_yes = 0.49, market_p_yes = 0.48 → edge_yes = 0.01 < 0.04.
+    // We now refuse to trade at all when the edge is below the 4¢ floor
+    // (this is checked before Kelly is computed).
     const r = computeJudgeRecommendation({
       model_p_yes: 0.49,
       market_p_yes: 0.48,
@@ -108,9 +108,23 @@ describe("computeJudgeRecommendation (Kelly-based sizing)", () => {
     });
     expect(r.signal).toBe("PASS");
     expect(r.size_usdc).toBe(0);
-    // Kelly fraction is still computed so the trace records the (sub-dust) edge.
-    expect(r.kelly_fraction).toBeGreaterThan(0);
+    expect(r.kelly_fraction).toBe(0);
     expect(r.edge_yes).toBeCloseTo(0.01, 5);
+    expect(r.reason).toMatch(/below the 4¢ minimum/);
+  });
+
+  it("(e2) edge ≥ 4¢ but tiny bankroll → PASS via dust ($0.05) gate", () => {
+    // model_p_yes = 0.55, market_p_yes = 0.50, balance = $1 → edge = 5¢,
+    // kelly = 0.05 / 0.50 = 0.10, quarter-Kelly = 0.025, size = $0.025 < $0.05.
+    const r = computeJudgeRecommendation({
+      model_p_yes: 0.55,
+      market_p_yes: 0.5,
+      balance: 1,
+    });
+    expect(r.signal).toBe("PASS");
+    expect(r.size_usdc).toBe(0);
+    expect(r.kelly_fraction).toBeGreaterThan(0);
+    expect(r.reason).toMatch(/dust/i);
   });
 
   it(
