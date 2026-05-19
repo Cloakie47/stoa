@@ -399,7 +399,15 @@ function makeBot(env: Env): Bot {
 
   Exit
   /withdraw <addr> <amount> — withdraw any time`;
-    await safeReply(ctx, text);
+    // Send as plain text (no parse_mode). Markdown would interpret the
+    // single underscore in /export_key and /shielded_balance as italic
+    // markers, stripping them on render — users would see /exportkey
+    // and /shieldedbalance, which are not registered commands.
+    try {
+      await ctx.reply(text);
+    } catch (e) {
+      console.warn(`[help] reply failed: ${(e as Error).message}`);
+    }
   });
 
   return bot;

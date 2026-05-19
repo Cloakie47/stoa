@@ -122,7 +122,15 @@ export class StableTrustClient {
   constructor(opts: StableTrustClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.fetchImpl = opts.fetchImpl ?? fetch;
+    // CRITICAL: bind global fetch to globalThis when storing on `this`.
+    // Cloudflare Workers' fetch checks its `this` reference at call time and
+    // throws "Illegal invocation" if it is not the global. Storing
+    // `this.fetchImpl = fetch` and later calling `this.fetchImpl(url, ...)`
+    // would call fetch with `this === StableTrustClient instance`, which
+    // trips the runtime check. Injected fetchImpl (test mocks) does not
+    // need binding because it is already a standalone function.
+    this.fetchImpl =
+      opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.endpoints = { ...STABLETRUST_ENDPOINTS, ...(opts.endpoints ?? {}) };
   }
 

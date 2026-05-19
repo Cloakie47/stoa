@@ -37,20 +37,24 @@ const pendingExports: PendingExportStore = makePendingExportStore();
 export const GROUP_CHAT_REFUSAL =
   "🔒 /export_key only works in direct messages with the bot. Open a private chat with @stoa_insight_bot.";
 
+// Commands are wrapped in backticks because grammY/Telegram replies are
+// sent with parse_mode=Markdown by default — a bare `/export_key_confirm`
+// is parsed as `/export` + italic "key" + `_confirm`, rendering visibly
+// as `/exportkeyconfirm`. Backticks make the underscores literal.
 const STEP1_REPLY = [
   "⚠️ *Export Private Key*",
   "",
   "This will reveal your wallet's private key. Anyone with this key has complete control of your funds.",
   "",
-  "Type /export_key_confirm within 60 seconds to proceed.",
+  "Type `/export_key_confirm` within 60 seconds to proceed.",
   "Any other message cancels.",
 ].join("\n");
 
 const EXPIRED_REPLY =
-  "Confirmation window expired. Run /export_key again to retry.";
+  "Confirmation window expired. Run `/export_key` again to retry.";
 
 const NO_PENDING_REPLY =
-  "No pending export. Run /export_key first to begin the confirmation flow.";
+  "No pending export. Run `/export_key` first to begin the confirmation flow.";
 
 const NO_WALLET_REPLY =
   "You don't have a wallet yet — run /start first.";
