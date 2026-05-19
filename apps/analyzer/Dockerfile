@@ -20,21 +20,29 @@ WORKDIR /app
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
-# Copy package manifests first for better Docker-layer caching. Both
+# Copy package manifests first for better Docker-layer caching. All three
 # workspace packages must be present because apps/analyzer has file: refs
-# to them.
+# to them (bot-core depends on both insight-engine and stabletrust-client).
 COPY packages/bot-core/package.json    packages/bot-core/package.json
 COPY packages/insight-engine/package.json packages/insight-engine/package.json
+COPY packages/stabletrust-client/package.json packages/stabletrust-client/package.json
 COPY apps/analyzer/package.json        apps/analyzer/package.json
 
 # Copy sources
 COPY packages/bot-core    packages/bot-core
 COPY packages/insight-engine packages/insight-engine
+COPY packages/stabletrust-client packages/stabletrust-client
 COPY apps/analyzer        apps/analyzer
 
 # Install all workspace deps (no frozen lockfile — Railway builds without
 # the root lockfile and the file: refs are resolved fresh).
+# Build order: insight-engine first (no local deps), then stabletrust-client
+# (no local deps), then bot-core (depends on both), then analyzer.
 WORKDIR /app/packages/insight-engine
+RUN pnpm install --prod=false --ignore-scripts \
+  && pnpm run build
+
+WORKDIR /app/packages/stabletrust-client
 RUN pnpm install --prod=false --ignore-scripts \
   && pnpm run build
 
