@@ -127,6 +127,14 @@ function chainIdOf(cfg: BotCoreConfig): number {
   return Number(cfg.ARC_CHAIN_ID);
 }
 
+/** Optional StableTrust contract address override. Returns the configured
+ *  value when set+non-empty, otherwise undefined so the client omits the
+ *  field from the request body. See BotCoreConfig.STABLETRUST_ARC_CONTRACT_ADDRESS. */
+function contractAddressOf(cfg: BotCoreConfig): string | undefined {
+  const v = cfg.STABLETRUST_ARC_CONTRACT_ADDRESS;
+  return v && v.length > 0 ? v : undefined;
+}
+
 /** Public → shielded balance (user-side /shield command). */
 export async function shieldDeposit(args: {
   cfg: BotCoreConfig;
@@ -139,6 +147,7 @@ export async function shieldDeposit(args: {
     tokenAddress: args.cfg.STABLETRUST_ARC_USDC_ADDRESS,
     amount: args.amountMicros.toString(),
     chainId: chainIdOf(args.cfg),
+    contractAddress: contractAddressOf(args.cfg),
     waitForFinalization: true,
   });
 }
@@ -153,6 +162,7 @@ export async function shieldedBalanceOf(args: {
     privateKey: args.userPrivateKey,
     tokenAddress: args.cfg.STABLETRUST_ARC_USDC_ADDRESS,
     chainId: chainIdOf(args.cfg),
+    contractAddress: contractAddressOf(args.cfg),
   });
 }
 
@@ -168,6 +178,7 @@ export async function shieldWithdraw(args: {
     tokenAddress: args.cfg.STABLETRUST_ARC_USDC_ADDRESS,
     amount: args.amountMicros.toString(),
     chainId: chainIdOf(args.cfg),
+    contractAddress: contractAddressOf(args.cfg),
     waitForFinalization: true,
   });
 }
@@ -185,7 +196,107 @@ export async function confidentialFeeTransfer(args: {
     tokenAddress: args.cfg.STABLETRUST_ARC_USDC_ADDRESS,
     amount: args.amountMicros.toString(),
     chainId: chainIdOf(args.cfg),
+    contractAddress: contractAddressOf(args.cfg),
     useOffchainVerify: false,
     waitForFinalization: true,
   });
+}
+
+// ── 3-way confidential split (Phase 1 V1) ────────────────────────────────────
+
+export interface SplitLeg {
+  recipient: Address;
+  amount_micros: bigint;
+}
+
+export interface SplitLegResult {
+  recipient: Address;
+  amount_micros: bigint;
+  tx_hash: Hex | null; // null when all retries exhausted
+  ok: boolean;
+}
+
+/**
+ * 70/20/10 split with the remainder assigned to the operator leg. Exact at
+ * standard fee amounts ($0.15 → 105k / 30k / 15k; $0.20 → 140k / 40k / 20k);
+ * any rounding remainder from non-divisible amounts goes to operator so the
+ * three legs always sum exactly to `feeMicros` (no missing micros).
+ */
+export function computeSplitLegs(
+  feeMicros: bigint,
+  recipients: { operator: Address; maintainers: Address; canteen: Address },
+): SplitLeg[] {
+  const maintainersAmt = (feeMicros * 20n) / 100n;
+  const canteenAmt = (feeMicros * 10n) / 100n;
+  const operatorAmt = feeMicros - maintainersAmt - canteenAmt;
+  return [
+    { recipient: recipients.operator, amount_micros: operatorAmt },
+    { recipient: recipients.maintainers, amount_micros: maintainersAmt },
+    { recipient: recipients.canteen, amount_micros: canteenAmt },
+  ];
+}
+
+/**
+ * Confidential leg with exponential-backoff retry. Tries `maxAttempts`
+ * times with 1s/2s/4s sleeps between attempts. Throws the last error if
+ * all attempts fail; resolves with the tx hash on first success.
+ */
+export async function sendLegWithRetry(args: {
+  cfg: BotCoreConfig;
+  userPrivateKey: Hex;
+  leg: SplitLeg;
+  maxAttempts?: number;
+}): Promise<Hex> {
+  const { cfg, userPrivateKey, leg } = args;
+  const maxAttempts = args.maxAttempts ?? 3;
+  const client = getStableTrustClient(cfg);
+  let lastErr: Error | null = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const r = await client.confidentialTransfer({
+        privateKey: userPrivateKey,
+        recipientAddress: leg.recipient,
+        tokenAddress: cfg.STABLETRUST_ARC_USDC_ADDRESS,
+        amount: leg.amount_micros.toString(),
+        chainId: chainIdOf(cfg),
+        contractAddress: contractAddressOf(cfg),
+        useOffchainVerify: false,
+        waitForFinalization: true,
+      });
+      return r.tx as Hex;
+    } catch (e) {
+      lastErr = e as Error;
+      if (attempt < maxAttempts) {
+        const sleepMs = 1000 * Math.pow(2, attempt - 1); // 1s, 2s
+        console.warn(
+          `[stabletrust] leg to ${leg.recipient} attempt ${attempt}/${maxAttempts} failed: ${lastErr.message}. Sleeping ${sleepMs}ms.`,
+        );
+        await new Promise((r) => setTimeout(r, sleepMs));
+      }
+    }
+  }
+  throw lastErr ?? new Error("sendLegWithRetry exhausted with no error captured");
+}
+
+/** Resolve a confidential split recipient: prefer the dedicated confidential
+ *  address, fall back to the public-flow recipient. */
+export function confidentialSplitRecipients(cfg: BotCoreConfig): {
+  operator: Address;
+  maintainers: Address;
+  canteen: Address;
+} {
+  return {
+    operator: (cfg.STOA_CONFIDENTIAL_OPERATOR_ADDRESS &&
+    cfg.STOA_CONFIDENTIAL_OPERATOR_ADDRESS.length > 0
+      ? cfg.STOA_CONFIDENTIAL_OPERATOR_ADDRESS
+      : cfg.STOA_RECIPIENT_OPERATOR) as Address,
+    maintainers: (cfg.STOA_CONFIDENTIAL_MAINTAINERS_ADDRESS &&
+    cfg.STOA_CONFIDENTIAL_MAINTAINERS_ADDRESS.length > 0
+      ? cfg.STOA_CONFIDENTIAL_MAINTAINERS_ADDRESS
+      : cfg.STOA_RECIPIENT_MAINTAINERS) as Address,
+    canteen: (cfg.STOA_CONFIDENTIAL_CANTEEN_ADDRESS &&
+    cfg.STOA_CONFIDENTIAL_CANTEEN_ADDRESS.length > 0
+      ? cfg.STOA_CONFIDENTIAL_CANTEEN_ADDRESS
+      : cfg.STOA_RECIPIENT_CANTEEN) as Address,
+  };
 }

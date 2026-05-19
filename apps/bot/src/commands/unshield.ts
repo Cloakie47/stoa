@@ -77,7 +77,7 @@ export async function handleUnshield(
       userPrivateKey: wallet.privateKey,
       amountMicros,
     });
-    const txHash = res.receipt.hash;
+    const txHash = res.tx;
     console.log(
       `[unshield] user=${wallet.address} amount=$${amountUsdc.toFixed(2)} tx=${txHash} result=success`,
     );

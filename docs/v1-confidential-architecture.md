@@ -187,7 +187,7 @@ async function sendLegWithRetry(args: {
         useOffchainVerify: false,
         waitForFinalization: true,
       });
-      return { txHash: r.receipt.hash as Hex };
+      return { txHash: r.tx as Hex };
     } catch (e) {
       lastErr = e as Error;
       const sleepMs = 1000 * Math.pow(2, attempt - 1);  // 1s, 2s, 4s

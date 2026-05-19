@@ -19,17 +19,24 @@ export interface DispatchAnalyzeArgs {
   telegramUserId: number;
   marketUrl: string;
   requestId: string;
+  /** Optional payment-mode override. When omitted, the analyzer uses the
+   *  default policy (attempt shielded if STOA_USE_STABLETRUST and balance
+   *  covers fee, else public). Set explicitly when the user chose a mode
+   *  via the inline keyboard. */
+  paymentMode?: "public" | "shielded";
 }
 
 export async function dispatchAnalyzeJob(
   args: DispatchAnalyzeArgs,
 ): Promise<void> {
-  const { env, chatId, telegramUserId, marketUrl, requestId } = args;
+  const { env, chatId, telegramUserId, marketUrl, requestId, paymentMode } =
+    args;
   const body = JSON.stringify({
     chatId,
     telegramUserId,
     marketUrl,
     requestId,
+    ...(paymentMode ? { paymentMode } : {}),
   });
   const sigHeaders = await signRequest(body, env.ANALYZER_HMAC_SECRET);
 

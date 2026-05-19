@@ -56,6 +56,29 @@ export interface BotCoreConfig {
    *  + /confirm fees. When unset, the receiver address is derived from
    *  OPERATOR_PRIVATE_KEY — V1 default. */
   STOA_OPERATOR_STABLETRUST_PRIVATE_KEY?: string;
+  /** Optional confidential-flow split recipients. When set, the shielded
+   *  fee charge does a 3-way 70/20/10 split via independent confidential
+   *  transfers to these three addresses. When unset, each field defaults
+   *  to the matching public-flow recipient — STOA_RECIPIENT_OPERATOR /
+   *  _MAINTAINERS / _CANTEEN — so the operator can rotate shielded
+   *  receivers independently from the public ones if needed. */
+  STOA_CONFIDENTIAL_OPERATOR_ADDRESS?: string;
+  STOA_CONFIDENTIAL_MAINTAINERS_ADDRESS?: string;
+  STOA_CONFIDENTIAL_CANTEEN_ADDRESS?: string;
+  /** Optional StableTrust contract address override.
+   *
+   *  Fairblock's API normally looks up the deployed StableTrust contract
+   *  by chainId from a server-side registry. For chains whose contract
+   *  exists on-chain but has NOT been added to that registry yet (Circle's
+   *  Arc Testnet = 5042002 as of 2026-05-19), Stoa can pass the deployed
+   *  contract address directly per-request and the API will use it
+   *  instead of the registry lookup.
+   *
+   *  When undefined or empty, the field is omitted from every StableTrust
+   *  HTTP call — preserving the working wire shape for chains already in
+   *  Fairblock's registry. Set this once Mani shares the deployed contract
+   *  address for chain 5042002. */
+  STABLETRUST_ARC_CONTRACT_ADDRESS?: string;
 }
 
 export function feeAnalyzeMicros(cfg: BotCoreConfig): bigint {

@@ -27,11 +27,18 @@
  *   CANTEEN_PRIVATE_KEY       — 10% fee recipient
  *
  * Optional overrides:
- *   STABLETRUST_API_URL       — default https://stabletrust-api.fairblock.network
- *   STABLETRUST_ARC_USDC      — default 0x3600000000000000000000000000000000000000
- *   ARC_RPC_URL               — default https://rpc.testnet.arc.network (not used by
- *                                this script directly, but read for parity with the
- *                                rest of the debug-script env)
+ *   STABLETRUST_API_URL              — default https://stabletrust-api.fairblock.network
+ *   STABLETRUST_ARC_USDC             — default 0x3600000000000000000000000000000000000000
+ *   STABLETRUST_ARC_CONTRACT_ADDRESS — when set, threaded into every API call as the
+ *                                      `contractAddress` body param. Required for chains
+ *                                      (e.g. 5042002) whose StableTrust contract has been
+ *                                      deployed but not yet added to Fairblock's
+ *                                      server-side registry. Unset = field omitted from
+ *                                      the wire body, preserving current behavior on
+ *                                      chains that ARE in the registry.
+ *   ARC_RPC_URL                      — default https://rpc.testnet.arc.network (not used
+ *                                      by this script directly, but read for parity with
+ *                                      the rest of the debug-script env)
  */
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -130,6 +137,7 @@ interface ClientLike {
     privateKey: string;
     tokenAddress: string;
     chainId: number;
+    contractAddress?: string;
   }): Promise<{
     balance: { total: string; available: string; pending: string };
   }>;
@@ -138,8 +146,9 @@ interface ClientLike {
     tokenAddress: string;
     amount: string;
     chainId: number;
+    contractAddress?: string;
     waitForFinalization?: boolean;
-  }): Promise<{ receipt: { hash: string } }>;
+  }): Promise<{ success?: boolean; message?: string; tx: string }>;
 }
 
 /**
@@ -183,13 +192,13 @@ function makeDryRunClient(): ClientLike {
       // Simulate ~500ms "finalization" so the dry-run shows real elapsed time.
       await new Promise((r) => setTimeout(r, 500));
       return {
-        receipt: {
-          hash:
-            "0x" +
-            Array.from({ length: 32 })
-              .map(() => Math.floor(Math.random() * 256).toString(16).padStart(2, "0"))
-              .join(""),
-        },
+        success: true,
+        message: "Deposit successful",
+        tx:
+          "0x" +
+          Array.from({ length: 32 })
+            .map(() => Math.floor(Math.random() * 256).toString(16).padStart(2, "0"))
+            .join(""),
       };
     },
   };
@@ -207,29 +216,46 @@ async function initializeOne(args: {
   privateKey: Hex;
   tokenAddress: string;
   chainId: number;
+  contractAddress?: string;
 }): Promise<InitOutcome> {
-  const { client, label, privateKey, tokenAddress, chainId } = args;
+  const { client, label, privateKey, tokenAddress, chainId, contractAddress } =
+    args;
   const address = privateKeyToAccount(privateKey).address;
   const masked = maskAddress(address);
 
   console.log(`[init-system-wallets] Initializing ${label} ${masked}`);
 
-  // /balance pre-check — non-error = account already registered.
+  // /balance pre-check — Fairblock returns success with $0 for both
+  // already-initialized-but-empty AND unregistered addresses (verified
+  // 2026-05-19), so /balance success alone is NOT proof of ensureAccount
+  // having run. Only treat a wallet as "already initialized" when the
+  // shielded balance is NON-ZERO — that guarantees a prior /deposit
+  // succeeded and therefore ensureAccount completed. Zero-balance and
+  // error responses both fall through to the /deposit branch, which is
+  // safe: depositing to an already-registered account is a no-op for
+  // ensureAccount and just adds $0.10 to the shielded balance.
   try {
     const bal = await client.getShieldedBalance({
       privateKey,
       tokenAddress,
       chainId,
+      ...(contractAddress ? { contractAddress } : {}),
     });
+    const totalMicros = BigInt(bal.balance.total);
+    if (totalMicros > 0n) {
+      console.log(
+        `[init-system-wallets]   /balance check → already initialized, total=$${fmtUsdc(bal.balance.total)}`,
+      );
+      console.log(`[init-system-wallets] ✅ ${label} initialized (skipped)\n`);
+      return {
+        alreadyInitialized: true,
+        balanceMicros: bal.balance.total,
+        depositTx: null,
+      };
+    }
     console.log(
-      `[init-system-wallets]   /balance check → already initialized, total=$${fmtUsdc(bal.balance.total)}`,
+      `[init-system-wallets]   /balance check → $0.00 — proceeding with /deposit to guarantee ensureAccount`,
     );
-    console.log(`[init-system-wallets] ✅ ${label} initialized (skipped)\n`);
-    return {
-      alreadyInitialized: true,
-      balanceMicros: bal.balance.total,
-      depositTx: null,
-    };
   } catch (e) {
     if (e instanceof StableTrustError) {
       console.log(
@@ -253,11 +279,12 @@ async function initializeOne(args: {
     tokenAddress,
     amount: INIT_AMOUNT_MICROS,
     chainId,
+    ...(contractAddress ? { contractAddress } : {}),
     waitForFinalization: true,
   });
   const depositElapsed = Date.now() - depositStart;
   console.log(
-    `[init-system-wallets]   /deposit tx ${maskTxHash(deposit.receipt.hash)} finalized in ${fmtElapsed(depositElapsed)}`,
+    `[init-system-wallets]   /deposit tx ${maskTxHash(deposit.tx)} finalized in ${fmtElapsed(depositElapsed)}`,
   );
 
   // Post-deposit /balance verification — confirms ensureAccount succeeded
@@ -266,6 +293,7 @@ async function initializeOne(args: {
     privateKey,
     tokenAddress,
     chainId,
+    ...(contractAddress ? { contractAddress } : {}),
   });
   console.log(
     `[init-system-wallets]   /balance check → ${bal.balance.total} micros ($${fmtUsdc(bal.balance.total)})`,
@@ -274,7 +302,7 @@ async function initializeOne(args: {
   return {
     alreadyInitialized: false,
     balanceMicros: bal.balance.total,
-    depositTx: deposit.receipt.hash,
+    depositTx: deposit.tx,
   };
 }
 
@@ -336,10 +364,18 @@ async function main(): Promise<void> {
 
   const apiUrl = env.STABLETRUST_API_URL || DEFAULT_API_URL;
   const tokenAddress = env.STABLETRUST_ARC_USDC || DEFAULT_USDC;
+  const contractAddress =
+    env.STABLETRUST_ARC_CONTRACT_ADDRESS &&
+    env.STABLETRUST_ARC_CONTRACT_ADDRESS.length > 0
+      ? env.STABLETRUST_ARC_CONTRACT_ADDRESS
+      : undefined;
 
   console.log(`Fairblock API:    ${apiUrl}`);
   console.log(`Token:            ${tokenAddress}`);
   console.log(`Chain ID:         ${ARC_CHAIN_ID}`);
+  console.log(
+    `Contract:         ${contractAddress ?? "(unset — using Fairblock's chainId registry default)"}`,
+  );
   console.log(`Wallets to init:  ${WALLETS.map((w) => w.label).join(", ")}\n`);
 
   const client: ClientLike = dryRun
@@ -356,6 +392,7 @@ async function main(): Promise<void> {
         privateKey: pk,
         tokenAddress,
         chainId: ARC_CHAIN_ID,
+        contractAddress,
       });
     } catch (e) {
       const msg = (e as Error).message;

@@ -64,6 +64,10 @@ export interface Env {
   FAIRBLOCK_API_URL?: string;
   STABLETRUST_ARC_USDC_ADDRESS?: string;
   STOA_OPERATOR_STABLETRUST_PRIVATE_KEY?: string;
+  /** Optional. Deployed StableTrust contract address override. Set when
+   *  Fairblock has deployed StableTrust on chain ARC_CHAIN_ID but has not
+   *  yet added it to their server-side registry. */
+  STABLETRUST_ARC_CONTRACT_ADDRESS?: string;
 }
 
 /**
@@ -108,6 +112,11 @@ export function toCfg(env: Env): BotCoreConfig {
         : env.ARC_USDC,
     STOA_OPERATOR_STABLETRUST_PRIVATE_KEY:
       env.STOA_OPERATOR_STABLETRUST_PRIVATE_KEY,
+    STABLETRUST_ARC_CONTRACT_ADDRESS:
+      env.STABLETRUST_ARC_CONTRACT_ADDRESS &&
+      env.STABLETRUST_ARC_CONTRACT_ADDRESS.length > 0
+        ? env.STABLETRUST_ARC_CONTRACT_ADDRESS
+        : undefined,
   };
 }
 

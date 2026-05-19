@@ -77,4 +77,8 @@ export {
   shieldedBalanceOf,
   shieldWithdraw,
   confidentialFeeTransfer,
+  computeSplitLegs,
+  sendLegWithRetry,
+  confidentialSplitRecipients,
 } from "./stabletrust.js";
+export type { SplitLeg, SplitLegResult } from "./stabletrust.js";

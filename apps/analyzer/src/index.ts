@@ -63,6 +63,9 @@ interface AnalyzeJobBody {
   telegramUserId: number;
   marketUrl: string;
   requestId: string;
+  /** Optional payment-mode override from the bot's inline-keyboard
+   *  selection. When omitted, runAnalyzePipeline uses its default policy. */
+  paymentMode?: "public" | "shielded";
 }
 
 app.post("/jobs/analyze", async (req: Request, res: Response) => {
@@ -92,6 +95,11 @@ app.post("/jobs/analyze", async (req: Request, res: Response) => {
     `[jobs/analyze] req=${body.requestId} user=${body.telegramUserId} url=${body.marketUrl}`,
   );
 
+  const paymentMode =
+    body.paymentMode === "public" || body.paymentMode === "shielded"
+      ? body.paymentMode
+      : undefined;
+
   // Schedule in the background — don't await; respond 202 right away.
   void runAnalyzePipeline({
     cfg: env.cfg,
@@ -100,6 +108,7 @@ app.post("/jobs/analyze", async (req: Request, res: Response) => {
     telegramUserId: body.telegramUserId,
     marketUrl: body.marketUrl,
     requestId: body.requestId,
+    paymentMode,
   }).catch((e: unknown) => {
     console.error(
       `[jobs/analyze] req=${body.requestId} uncaught: ${(e as Error).message}`,

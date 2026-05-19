@@ -15,6 +15,7 @@ import {
 const FAKE_USDC = "0x3600000000000000000000000000000000000000";
 const FAKE_PK = "0x" + "ab".repeat(32);
 const FAKE_CHAIN_ID = 5042002;
+const FAKE_CONTRACT = "0xC011AB1eC0bbA11C0bbA11C0bbA11C0bbA11C0bb";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -28,7 +29,7 @@ describe("StableTrustClient URL construction", () => {
 
   it("strips trailing slashes from baseUrl", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
-      jsonResponse(200, { receipt: { hash: "0xdeadbeef" } }),
+      jsonResponse(200, { success: true, message: "Deposit successful", tx: "0xdeadbeef" }),
     );
     const c = new StableTrustClient({
       baseUrl: "https://example.com////",
@@ -45,9 +46,27 @@ describe("StableTrustClient URL construction", () => {
     expect(url).toBe("https://example.com/deposit");
   });
 
+  it("returns the {success, message, tx} envelope verbatim", async () => {
+    const wire = {
+      success: true,
+      message: "Deposit successful",
+      tx: "0x9174e8553283821d9501bdc8a5a65fecd7e93b7f7057c280bee6bee20b46499f",
+    };
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, wire));
+    const c = new StableTrustClient({ baseUrl: "https://x.test", fetchImpl });
+    const r = await c.depositToShield({
+      privateKey: FAKE_PK,
+      tokenAddress: FAKE_USDC,
+      amount: "100000",
+      chainId: FAKE_CHAIN_ID,
+    });
+    expect(r).toEqual(wire);
+    expect(r.tx).toBe(wire.tx);
+  });
+
   it("sends correct POST body with finalization default true", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
-      jsonResponse(200, { receipt: { hash: "0x1" } }),
+      jsonResponse(200, { success: true, tx: "0x1" }),
     );
     const c = new StableTrustClient({ baseUrl: "https://x.test", fetchImpl });
     await c.confidentialTransfer({
@@ -72,6 +91,103 @@ describe("StableTrustClient URL construction", () => {
       useOffchainVerify: false,
       waitForFinalization: true,
     });
+  });
+
+  it("includes contractAddress in body when provided", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, { success: true, tx: "0x2" }),
+    );
+    const c = new StableTrustClient({ baseUrl: "https://x.test", fetchImpl });
+    await c.depositToShield({
+      privateKey: FAKE_PK,
+      tokenAddress: FAKE_USDC,
+      amount: "100000",
+      chainId: FAKE_CHAIN_ID,
+      contractAddress: FAKE_CONTRACT,
+    });
+    const [, init] = fetchImpl.mock.calls[0]!;
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body).toEqual({
+      privateKey: FAKE_PK,
+      tokenAddress: FAKE_USDC,
+      amount: "100000",
+      chainId: FAKE_CHAIN_ID,
+      contractAddress: FAKE_CONTRACT,
+      waitForFinalization: true,
+    });
+  });
+
+  it("threads contractAddress through every endpoint when provided", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async () =>
+      jsonResponse(200, {
+        success: true,
+        tx: "0x3",
+        balance: { total: "0", available: "0", pending: "0" },
+      }),
+    );
+    const c = new StableTrustClient({ baseUrl: "https://x.test", fetchImpl });
+
+    await c.getShieldedBalance({
+      privateKey: FAKE_PK,
+      tokenAddress: FAKE_USDC,
+      chainId: FAKE_CHAIN_ID,
+      contractAddress: FAKE_CONTRACT,
+    });
+    await c.confidentialTransfer({
+      privateKey: FAKE_PK,
+      recipientAddress: "0xabc",
+      tokenAddress: FAKE_USDC,
+      amount: "150000",
+      chainId: FAKE_CHAIN_ID,
+      contractAddress: FAKE_CONTRACT,
+    });
+    await c.withdrawToPublic({
+      privateKey: FAKE_PK,
+      tokenAddress: FAKE_USDC,
+      amount: "150000",
+      chainId: FAKE_CHAIN_ID,
+      contractAddress: FAKE_CONTRACT,
+    });
+
+    for (const call of fetchImpl.mock.calls) {
+      const init = call[1] as RequestInit;
+      const body = JSON.parse(init.body as string) as Record<string, unknown>;
+      expect(body.contractAddress).toBe(FAKE_CONTRACT);
+    }
+  });
+
+  it("omits contractAddress from body when absent", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, { success: true, tx: "0x4" }),
+    );
+    const c = new StableTrustClient({ baseUrl: "https://x.test", fetchImpl });
+    await c.depositToShield({
+      privateKey: FAKE_PK,
+      tokenAddress: FAKE_USDC,
+      amount: "100000",
+      chainId: FAKE_CHAIN_ID,
+    });
+    const [, init] = fetchImpl.mock.calls[0]!;
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect("contractAddress" in body).toBe(false);
+  });
+
+  it("omits contractAddress when empty string", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, { success: true, tx: "0x5" }),
+    );
+    const c = new StableTrustClient({ baseUrl: "https://x.test", fetchImpl });
+    await c.confidentialTransfer({
+      privateKey: FAKE_PK,
+      recipientAddress: "0xabc",
+      tokenAddress: FAKE_USDC,
+      amount: "150000",
+      chainId: FAKE_CHAIN_ID,
+      contractAddress: "",
+    });
+    const [, init] = fetchImpl.mock.calls[0]!;
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect("contractAddress" in body).toBe(false);
   });
 
   it("respects endpoints override", async () => {

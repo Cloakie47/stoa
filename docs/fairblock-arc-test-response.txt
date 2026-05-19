@@ -1,0 +1,32 @@
+# Fairblock StableTrust API — Path 1 diagnostic response
+# Generated: 2026-05-19T12:30:47.386Z
+
+Request:
+  POST https://stabletrust-api.fairblock.network/deposit
+  Content-Type: application/json
+  body: {"privateKey":"0x[MASKED]","tokenAddress":"0x3600000000000000000000000000000000000000","amount":"200000","waitForFinalization":true,"chainId":5042002}
+
+Response:
+  status: 500
+  elapsed_ms: 1486
+  headers: {
+  "access-control-allow-origin": "*",
+  "cache-control": "public, max-age=0, must-revalidate",
+  "content-length": "201",
+  "content-type": "application/json; charset=utf-8",
+  "date": "Tue, 19 May 2026 12:30:48 GMT",
+  "etag": "W/\"c9-bgTHzj10BL57iMypZJ4sCjcB2wY\"",
+  "server": "Vercel",
+  "strict-transport-security": "max-age=63072000",
+  "x-powered-by": "Express",
+  "x-ratelimit-limit": "30",
+  "x-ratelimit-remaining": "29",
+  "x-ratelimit-reset": "1779193909",
+  "x-vercel-cache": "MISS",
+  "x-vercel-id": "bom1::iad1::r9fvg-1779193847502-8335d1723b08"
+}
+  body:
+    {"success":false,"error":"contractAddress is required for chainId 5042002. No default StableTrust contract is configured for this chain. Supported chainIds: 2201, 1244, 84532, 11155111, 421614, 42431"}
+
+
+

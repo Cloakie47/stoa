@@ -4,6 +4,12 @@ Living document for architecture decisions and the reasons behind them. Newest e
 
 ---
 
+## 2026-05-19 — Confidential payments (Fairblock StableTrust) gated off
+
+The Fairblock StableTrust integration shipped earlier today is architecturally complete and feature-flagged off (`STOA_USE_STABLETRUST=false`). Fairblock's docs advertise an "Arc" network at **chain 1244** which is *not* Circle's Arc — Circle's Arc Testnet is **chain 5042002** (per https://docs.arc.io/arc/references/connect-to-arc). One Path 1 deposit attempt with `chainId: 5042002` in the request body still routed to Base Sepolia (RLP chain `0x014a34` = 84532), confirming the API ignores chain hints and Fairblock has not deployed StableTrust contracts on chain 5042002. We will flip the flag on once Fairblock confirms deployment. See `apps/bot/README.md` (§ "Why confidential payments are currently disabled") + `docs/fairblock-issue-draft.md` for the GitHub issue to file.
+
+---
+
 ## 2026-05-16 — EURC multi-currency probe + Arc Blueprint alignment
 
 **EURC is deployed on Arc Testnet** at `0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a` (canonical address per https://docs.arc.io/arc/references/contract-addresses). Probed via `apps/bot/scripts/probe-eurc.ts`:

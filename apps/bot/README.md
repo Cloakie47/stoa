@@ -231,3 +231,58 @@ wrangler secret put STOA_OPERATOR_STABLETRUST_PRIVATE_KEY
 
 Redeploy the Worker and Railway analyzer; existing public-flow users
 continue uninterrupted.
+
+### Why confidential payments are currently disabled (2026-05-19)
+
+The StableTrust integration above is **architecturally complete and
+typecheck-clean**, but the master flag stays `false` until Fairblock
+deploys StableTrust on Circle's Arc Testnet. Concrete findings:
+
+1. **Brand collision**: Fairblock's
+   [supported-networks list](https://stabletrust-docs.fairblock.network/api)
+   includes a network called "Arc" at **chain ID 1244**. That is not
+   Circle's Arc. Per [docs.arc.io](https://docs.arc.io/arc/references/connect-to-arc),
+   **Circle's Arc Testnet is chain 5042002** (RPC
+   `https://rpc.testnet.arc.network`). Stoa's `StoaSettler`, `TracePin`,
+   operator wallet, and user wallets are all on 5042002. Chain 1244 is a
+   different project that happens to share the name.
+
+2. **No chain-routing param in the HTTP API**. Documented request
+   schemas for `/deposit`, `/balance`, `/transfer`, `/withdraw` list
+   only `privateKey`, `tokenAddress`, `amount`, plus boolean flags. No
+   `chainId`, `rpcUrl`, `network`, etc. We confirmed this empirically:
+   passing `chainId: 5042002` in the body still returns an
+   "insufficient funds" error with the transaction RLP pointing at
+   chain `0x014a34` (84532 = Base Sepolia). See
+   `docs/fairblock-arc-test-response.txt` for the captured response.
+
+3. **The SDK doesn't help either**. The
+   [complete-flow example](https://github.com/Fairblock/stabletrust-sdk/blob/main/examples/complete-flow.js)
+   iterates a `chain` config object whose entries are the networks
+   Fairblock has actually deployed StableTrust contracts on. Even if
+   we passed `rpcUrl: https://rpc.testnet.arc.network` + `chainId:
+   5042002` to `ConfidentialTransferClient`, the first
+   `ensureAccount(signer)` call would fail because no
+   StableTrust/EERC20 contracts exist at the expected addresses on
+   chain 5042002.
+
+4. **What we shipped vs. what's gated**:
+   - The `@stoa/stabletrust-client` package, `chargeAnalyzeFee` /
+     `chargeConfirmFee` shielded branches, `/shield`, `/unshield`,
+     `/shielded_balance` commands, footer rendering, and
+     `apps/analyzer/scripts/test-stabletrust.ts` integration test:
+     **all shipped, typecheck-clean, build-clean**.
+   - `STOA_USE_STABLETRUST` defaults to `false` everywhere (Worker
+     `wrangler.toml [vars]`, analyzer `loadEnv()`). The shielded code
+     paths are unreachable until the flag flips, so the public flow
+     is fully preserved.
+
+5. **Unblocking step**: When Fairblock confirms deployment on chain
+   5042002, the operator (a) updates `STABLETRUST_ARC_USDC_ADDRESS`
+   if Fairblock uses a different token contract on Arc, (b) runs
+   `apps/analyzer/scripts/test-stabletrust.ts` against the operator
+   wallet, (c) flips `STOA_USE_STABLETRUST=true` in `wrangler.toml`
+   and Railway env, (d) redeploys. No bot-core code changes required.
+
+See `docs/fairblock-issue-draft.md` for the GitHub issue text to file
+with Fairblock requesting chain 5042002 support.

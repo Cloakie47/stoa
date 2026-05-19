@@ -39,6 +39,20 @@ export interface StableTrustClientOptions {
   endpoints?: Partial<typeof STABLETRUST_ENDPOINTS>;
 }
 
+/**
+ * Optional `contractAddress` override on every args interface.
+ *
+ * Fairblock's API normally looks up the deployed StableTrust contract
+ * by chainId from a server-side registry. For chains whose contract
+ * has been deployed but NOT yet added to that registry (Circle's Arc
+ * Testnet = 5042002 as of 2026-05-19), the caller can pass the
+ * deployed contract address directly in the request body and the API
+ * will use it instead of the registry lookup.
+ *
+ * When `contractAddress` is undefined the field is OMITTED from the
+ * JSON body, preserving the existing wire shape for every chain
+ * already in Fairblock's default registry.
+ */
 export interface DepositArgs {
   privateKey: string;
   tokenAddress: string;
@@ -47,6 +61,8 @@ export interface DepositArgs {
    *  deposit to. Required since Fairblock supports multiple networks
    *  and the HTTP API does not infer the chain from tokenAddress alone. */
   chainId: number;
+  /** Optional StableTrust contract address override. See block comment above. */
+  contractAddress?: string;
   waitForFinalization?: boolean;
 }
 
@@ -54,6 +70,7 @@ export interface BalanceArgs {
   privateKey: string;
   tokenAddress: string;
   chainId: number;
+  contractAddress?: string;
   address?: string;
 }
 
@@ -71,6 +88,7 @@ export interface TransferArgs {
   tokenAddress: string;
   amount: string;
   chainId: number;
+  contractAddress?: string;
   useOffchainVerify?: boolean;
   waitForFinalization?: boolean;
 }
@@ -80,12 +98,19 @@ export interface WithdrawArgs {
   tokenAddress: string;
   amount: string;
   chainId: number;
+  contractAddress?: string;
   useOffchainVerify?: boolean;
   waitForFinalization?: boolean;
 }
 
+/** Response envelope for every tx-producing endpoint (/deposit, /transfer,
+ *  /withdraw). Verified empirically against the Fairblock API on 2026-05-19:
+ *  `{"success":true,"message":"Deposit successful","tx":"0x..."}`. */
 export interface TxReceipt {
-  receipt: { hash: string };
+  success: boolean;
+  message?: string;
+  /** Arc-side transaction hash for the on-chain effect of this call. */
+  tx: string;
 }
 
 export class StableTrustClient {
@@ -107,6 +132,7 @@ export class StableTrustClient {
       tokenAddress: args.tokenAddress,
       amount: args.amount,
       chainId: args.chainId,
+      ...(args.contractAddress ? { contractAddress: args.contractAddress } : {}),
       waitForFinalization: args.waitForFinalization ?? true,
     });
   }
@@ -116,6 +142,7 @@ export class StableTrustClient {
       privateKey: args.privateKey,
       tokenAddress: args.tokenAddress,
       chainId: args.chainId,
+      ...(args.contractAddress ? { contractAddress: args.contractAddress } : {}),
       ...(args.address ? { address: args.address } : {}),
     });
   }
@@ -127,6 +154,7 @@ export class StableTrustClient {
       tokenAddress: args.tokenAddress,
       amount: args.amount,
       chainId: args.chainId,
+      ...(args.contractAddress ? { contractAddress: args.contractAddress } : {}),
       useOffchainVerify: args.useOffchainVerify ?? false,
       waitForFinalization: args.waitForFinalization ?? true,
     });
@@ -138,6 +166,7 @@ export class StableTrustClient {
       tokenAddress: args.tokenAddress,
       amount: args.amount,
       chainId: args.chainId,
+      ...(args.contractAddress ? { contractAddress: args.contractAddress } : {}),
       useOffchainVerify: args.useOffchainVerify ?? false,
       waitForFinalization: args.waitForFinalization ?? true,
     });

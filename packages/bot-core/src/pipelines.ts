@@ -30,9 +30,12 @@ import type { DbClient } from "./db-client.js";
 import { runFullAnalysis } from "./insight.js";
 import { placeMockOrder } from "./limitless.js";
 import {
-  confidentialFeeTransfer,
+  computeSplitLegs,
+  confidentialSplitRecipients,
   pinTraceFromOperator,
+  sendLegWithRetry,
   shieldedBalanceOf,
+  type SplitLegResult,
 } from "./stabletrust.js";
 import { payStoaFee } from "./stoa.js";
 import { sendTelegramMessage } from "./telegram.js";
@@ -73,13 +76,17 @@ interface ChargeResult {
   mode: "public" | "shielded";
   /** User-side payment tx hash. In public mode this is the StoaSettler
    *  settle() tx (which also pinned the trace atomically). In shielded
-   *  mode this is the user→operator confidential transfer tx. */
+   *  mode this is the FIRST successful split leg's tx (operator's 70%). */
   user_tx: Hex;
   /** Operator-signed TracePin tx in shielded mode (the trace pin is split
    *  off from the user payment to break the on-chain correlation). Null
    *  in public mode because settle() pins the trace atomically. */
   trace_pin_tx: Hex | null;
   amount_micros: bigint;
+  /** Per-leg detail for the V1 3-way confidential split. Undefined in
+   *  public mode (StoaSettler does the split atomically on-chain).
+   *  Always 3 entries in shielded mode, even if some legs failed. */
+  splits?: SplitLegResult[];
 }
 
 async function chargeAnalyzeFee(args: {
@@ -91,6 +98,7 @@ async function chargeAnalyzeFee(args: {
   ipfsCid: string;
   telegramUserId: number;
   requestId: string;
+  paymentMode?: "public" | "shielded";
 }): Promise<ChargeResult> {
   const {
     cfg,
@@ -101,70 +109,29 @@ async function chargeAnalyzeFee(args: {
     ipfsCid,
     telegramUserId,
     requestId,
+    paymentMode,
   } = args;
   const feeUsd = Number(feeMicros) / 1e6;
 
-  if (cfg.STOA_USE_STABLETRUST) {
-    try {
-      const bal = await shieldedBalanceOf({
-        cfg,
-        userPrivateKey: wallet.privateKey,
-      });
-      const available = BigInt(bal.balance.available);
-      if (available >= feeMicros) {
-        // Commit to shielded path. Order of operations:
-        //   1. DB row marking the fee charge in flight (idempotent log).
-        //   2. Operator-signed TracePin tx — runs FIRST because if it
-        //      reverts the user hasn't paid anything; cheap fail-closed.
-        //   3. User → operator confidential transfer via Fairblock API.
-        // The 70/20/10 atomic split is SKIPPED — fees accumulate in the
-        // operator's StableTrust balance and split manually post-flow.
-        const feeId = await db.logFeeChargeStart(
-          telegramUserId,
-          "analyze",
-          Number(feeMicros),
-          null,
-        );
-        try {
-          const pinTx = await pinTraceFromOperator({ cfg, traceHash, ipfsCid });
-          const transfer = await confidentialFeeTransfer({
-            cfg,
-            userPrivateKey: wallet.privateKey,
-            amountMicros: feeMicros,
-          });
-          const userTx = transfer.receipt.hash as Hex;
-          await db.logFeeChargeMined(feeId, userTx);
-          console.log(
-            `[stabletrust] mode=shielded user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
-              `shielded_before=$${(Number(available) / 1e6).toFixed(2)} ` +
-              `shielded_after=$${(Number(available - feeMicros) / 1e6).toFixed(2)} ` +
-              `stabletrust_tx=${userTx} trace_pin_tx=${pinTx} request=${requestId}`,
-          );
-          return {
-            mode: "shielded",
-            user_tx: userTx,
-            trace_pin_tx: pinTx,
-            amount_micros: feeMicros,
-          };
-        } catch (e) {
-          await db.logFeeChargeFailed(feeId, (e as Error).message);
-          throw e;
-        }
-      } else {
-        console.log(
-          `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
-            `reason=insufficient_shielded_balance shielded_available=$${(Number(available) / 1e6).toFixed(2)} ` +
-            `request=${requestId}`,
-        );
-      }
-    } catch (err) {
-      // CircuitOpenError, StableTrustError, or any other client-side
-      // hiccup — fall through to public flow without surfacing an error.
-      console.log(
-        `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
-          `reason=stabletrust_error error=${(err as Error).message} request=${requestId}`,
-      );
-    }
+  // Shielded only when (flag on AND user did not explicitly pick public).
+  const tryShielded =
+    cfg.STOA_USE_STABLETRUST && paymentMode !== "public";
+
+  if (tryShielded) {
+    const shielded = await trySplitShielded({
+      cfg,
+      db,
+      wallet,
+      feeMicros,
+      kind: "analyze",
+      orderId: null,
+      traceHash,
+      ipfsCid,
+      telegramUserId,
+      requestId,
+    });
+    if (shielded) return shielded;
+    // Falls through to public on any error / insufficient balance / leg failure.
   }
 
   // ── Public flow — current production behavior, unchanged ────────────────
@@ -201,6 +168,155 @@ async function chargeAnalyzeFee(args: {
   };
 }
 
+/**
+ * Attempt the shielded 3-way split. Returns a ChargeResult on full success
+ * (all 3 legs succeeded) or `null` to signal the caller should fall through
+ * to public flow. Never throws — every failure mode (insufficient balance,
+ * Fairblock unreachable, leg failure) returns null with a structured log.
+ *
+ * Fall-through policy (V1): if ANY of the 3 legs fails after retries, fall
+ * through to public flow for THIS analyze so the user is unblocked.
+ * Successful legs LEAVE their funds with the corresponding recipient —
+ * V1 does not refund partial-success legs. Operator reconciles manually
+ * post-flow. V2 will add automatic refund-and-retry.
+ */
+async function trySplitShielded(args: {
+  cfg: BotCoreConfig;
+  db: DbClient;
+  wallet: { address: Address; privateKey: Hex };
+  feeMicros: bigint;
+  kind: "analyze" | "confirm";
+  orderId: string | null;
+  traceHash?: Hex;
+  ipfsCid?: string;
+  telegramUserId: number;
+  requestId: string;
+}): Promise<ChargeResult | null> {
+  const { cfg, db, wallet, feeMicros, kind, orderId, telegramUserId, requestId } =
+    args;
+  const feeUsd = Number(feeMicros) / 1e6;
+
+  // ── Pre-flight: shielded balance must cover the full fee ────────────────
+  let availableMicros: bigint;
+  try {
+    const bal = await shieldedBalanceOf({
+      cfg,
+      userPrivateKey: wallet.privateKey,
+    });
+    availableMicros = BigInt(bal.balance.available);
+  } catch (err) {
+    console.log(
+      `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+        `reason=stabletrust_balance_error error=${(err as Error).message} request=${requestId}`,
+    );
+    return null;
+  }
+  if (availableMicros < feeMicros) {
+    console.log(
+      `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+        `reason=insufficient_shielded_balance shielded_available=$${(Number(availableMicros) / 1e6).toFixed(2)} ` +
+        `request=${requestId}`,
+    );
+    return null;
+  }
+
+  // ── Compute the 3-way split + log fee start ─────────────────────────────
+  const recipients = confidentialSplitRecipients(cfg);
+  const legs = computeSplitLegs(feeMicros, recipients);
+  const feeId = await db.logFeeChargeStart(
+    telegramUserId,
+    kind,
+    Number(feeMicros),
+    orderId,
+  );
+
+  // ── Operator-signed TracePin tx (analyze only) — decoupled from payment ─
+  let pinTx: Hex | null = null;
+  if (kind === "analyze") {
+    try {
+      pinTx = await pinTraceFromOperator({
+        cfg,
+        traceHash: args.traceHash!,
+        ipfsCid: args.ipfsCid!,
+      });
+    } catch (err) {
+      await db.logFeeChargeFailed(feeId, (err as Error).message);
+      console.log(
+        `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+          `reason=tracepin_failed error=${(err as Error).message} request=${requestId}`,
+      );
+      return null;
+    }
+  }
+
+  // ── Three parallel confidential transfers with per-leg retry ────────────
+  const settled = await Promise.allSettled(
+    legs.map((leg) =>
+      sendLegWithRetry({
+        cfg,
+        userPrivateKey: wallet.privateKey,
+        leg,
+      }),
+    ),
+  );
+
+  const splits: SplitLegResult[] = legs.map((leg, i) => {
+    const r = settled[i]!;
+    if (r.status === "fulfilled") {
+      return {
+        recipient: leg.recipient,
+        amount_micros: leg.amount_micros,
+        tx_hash: r.value,
+        ok: true,
+      };
+    }
+    return {
+      recipient: leg.recipient,
+      amount_micros: leg.amount_micros,
+      tx_hash: null,
+      ok: false,
+    };
+  });
+
+  const failedLegs = splits.filter((s) => !s.ok);
+  if (failedLegs.length > 0) {
+    // V1 policy: any leg failure → fall through to public flow. Successful
+    // legs are NOT refunded; operator reconciles manually post-flow.
+    await db.logFeeChargeFailed(
+      feeId,
+      `shielded ${failedLegs.length}/3 legs failed; falling through to public`,
+    );
+    const failedDescriptions = splits
+      .map((s, i) =>
+        `${["operator", "maintainers", "canteen"][i]}=${s.ok ? "ok" : "FAIL"}`,
+      )
+      .join(" ");
+    console.warn(
+      `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+        `reason=shielded_partial_failure legs=[${failedDescriptions}] request=${requestId}`,
+    );
+    return null;
+  }
+
+  // All 3 legs succeeded.
+  const operatorTx = splits[0]!.tx_hash as Hex;
+  await db.logFeeChargeMined(feeId, operatorTx);
+  console.log(
+    `[stabletrust] mode=shielded user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+      `shielded_before=$${(Number(availableMicros) / 1e6).toFixed(2)} ` +
+      `shielded_after=$${(Number(availableMicros - feeMicros) / 1e6).toFixed(2)} ` +
+      `op_tx=${operatorTx} maint_tx=${splits[1]!.tx_hash} canteen_tx=${splits[2]!.tx_hash} ` +
+      `trace_pin_tx=${pinTx ?? "n/a"} request=${requestId}`,
+  );
+  return {
+    mode: "shielded",
+    user_tx: operatorTx,
+    trace_pin_tx: pinTx,
+    amount_micros: feeMicros,
+    splits,
+  };
+}
+
 async function chargeConfirmFee(args: {
   cfg: BotCoreConfig;
   db: DbClient;
@@ -209,64 +325,36 @@ async function chargeConfirmFee(args: {
   orderId: string;
   telegramUserId: number;
   requestId: string;
+  paymentMode?: "public" | "shielded";
 }): Promise<ChargeResult> {
-  const { cfg, db, wallet, feeMicros, orderId, telegramUserId, requestId } =
-    args;
+  const {
+    cfg,
+    db,
+    wallet,
+    feeMicros,
+    orderId,
+    telegramUserId,
+    requestId,
+    paymentMode,
+  } = args;
   const feeUsd = Number(feeMicros) / 1e6;
 
-  if (cfg.STOA_USE_STABLETRUST) {
-    try {
-      const bal = await shieldedBalanceOf({
-        cfg,
-        userPrivateKey: wallet.privateKey,
-      });
-      const available = BigInt(bal.balance.available);
-      if (available >= feeMicros) {
-        const feeId = await db.logFeeChargeStart(
-          telegramUserId,
-          "confirm",
-          Number(feeMicros),
-          orderId,
-        );
-        try {
-          // No TracePin step in /confirm — the trace was pinned during the
-          // earlier /analyze call; /confirm is just execution-side fee.
-          const transfer = await confidentialFeeTransfer({
-            cfg,
-            userPrivateKey: wallet.privateKey,
-            amountMicros: feeMicros,
-          });
-          const userTx = transfer.receipt.hash as Hex;
-          await db.logFeeChargeMined(feeId, userTx);
-          console.log(
-            `[stabletrust] mode=shielded user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
-              `shielded_before=$${(Number(available) / 1e6).toFixed(2)} ` +
-              `shielded_after=$${(Number(available - feeMicros) / 1e6).toFixed(2)} ` +
-              `stabletrust_tx=${userTx} request=${requestId}`,
-          );
-          return {
-            mode: "shielded",
-            user_tx: userTx,
-            trace_pin_tx: null,
-            amount_micros: feeMicros,
-          };
-        } catch (e) {
-          await db.logFeeChargeFailed(feeId, (e as Error).message);
-          throw e;
-        }
-      } else {
-        console.log(
-          `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
-            `reason=insufficient_shielded_balance shielded_available=$${(Number(available) / 1e6).toFixed(2)} ` +
-            `request=${requestId}`,
-        );
-      }
-    } catch (err) {
-      console.log(
-        `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
-          `reason=stabletrust_error error=${(err as Error).message} request=${requestId}`,
-      );
-    }
+  const tryShielded =
+    cfg.STOA_USE_STABLETRUST && paymentMode !== "public";
+
+  if (tryShielded) {
+    const shielded = await trySplitShielded({
+      cfg,
+      db,
+      wallet,
+      feeMicros,
+      kind: "confirm",
+      orderId,
+      telegramUserId,
+      requestId,
+    });
+    if (shielded) return shielded;
+    // Falls through on any error / insufficient balance / leg failure.
   }
 
   // Public flow
@@ -310,6 +398,13 @@ export interface AnalyzePipelineArgs {
   telegramUserId: number;
   marketUrl: string;
   requestId: string;
+  /** Optional payment-mode override from the bot's inline keyboard.
+   *  When undefined, falls back to the cfg-default behavior (attempt
+   *  shielded if STOA_USE_STABLETRUST and balance covers fee, else public).
+   *  When "public", skip the shielded attempt entirely.
+   *  When "shielded", attempt shielded even if balance is short (still
+   *  falls through to public on insufficient-balance). */
+  paymentMode?: "public" | "shielded";
 }
 
 export interface AnalyzePipelineResult {
@@ -393,6 +488,7 @@ export async function runAnalyzePipeline(
       ipfsCid: analysis.ipfs_cid ?? "",
       telegramUserId,
       requestId,
+      paymentMode: args.paymentMode,
     });
     // Pin tx for the proof block is operator's TracePin in shielded mode,
     // settle() in public mode — both emit the TracePinned event.

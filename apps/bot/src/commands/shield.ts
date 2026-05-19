@@ -53,7 +53,7 @@ export async function handleShield(args: ShieldArgs): Promise<ShieldResult> {
       userPrivateKey: wallet.privateKey,
       amountMicros,
     });
-    const txHash = res.receipt.hash;
+    const txHash = res.tx;
     console.log(
       `[shield] user=${wallet.address} amount=$${amountUsdc.toFixed(2)} tx=${txHash} result=success`,
     );

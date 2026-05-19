@@ -1,0 +1,12 @@
+# Fairblock /deposit response shape probe
+# Generated: 2026-05-19T13:15:34.032Z
+
+Request:
+  POST https://stabletrust-api.fairblock.network/deposit
+  body: {"privateKey":"0x[MASKED]","tokenAddress":"0x3600000000000000000000000000000000000000","amount":"100000","chainId":5042002,"waitForFinalization":true}
+
+Response:
+  status: 200
+  elapsed_ms: 10939
+  body:
+    {"success":true,"message":"Deposit successful","tx":"0x9174e8553283821d9501bdc8a5a65fecd7e93b7f7057c280bee6bee20b46499f"}

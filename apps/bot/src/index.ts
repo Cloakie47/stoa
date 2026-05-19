@@ -13,7 +13,7 @@
  * Cloudflare's waitUntil has a 30-second cap; the analyzer doesn't.
  */
 import { newRequestId } from "@stoa/bot-core";
-import { Bot, webhookCallback, type Context } from "grammy";
+import { Bot, InlineKeyboard, webhookCallback, type Context } from "grammy";
 
 import { dispatchAnalyzeJob } from "./commands/analyze.js";
 import { handleBalance } from "./commands/balance.js";
@@ -64,6 +64,10 @@ function makeBot(env: Env): Bot {
 
   // /analyze: ack synchronously, then dispatch the job to the Railway
   // analyzer. The analyzer runs the 30-60s pipeline and DMs the result.
+  //
+  // When STOA_USE_STABLETRUST is on, present an inline keyboard so the user
+  // can choose between a public on-chain payment and a confidential one.
+  // When off, dispatch directly to public flow.
   bot.command("analyze", async (ctx) => {
     const u = ctx.from;
     if (!u) return safeReply(ctx, "Missing user info.");
@@ -73,23 +77,100 @@ function makeBot(env: Env): Bot {
     if (!url) return safeReply(ctx, "Usage: /analyze <market_url>");
 
     const requestId = newRequestId();
+    const cfg = toCfg(ctx.env);
+
+    // Flag off → straight to public dispatch.
+    if (!cfg.STOA_USE_STABLETRUST) {
+      await safeReply(
+        ctx,
+        `🧠 Starting analysis (request \`${requestId}\`) — result in ~60 seconds. You can leave the chat; we'll DM you when it's done.`,
+      );
+      try {
+        await dispatchAnalyzeJob({
+          env: ctx.env,
+          chatId,
+          telegramUserId: u.id,
+          marketUrl: url,
+          requestId,
+          paymentMode: "public",
+        });
+      } catch (e) {
+        await safeReply(
+          ctx,
+          `❌ Couldn't reach the analyzer (request \`${requestId}\`): ${(e as Error).message}\n\nThis is an infrastructure issue, not a problem with your wallet. Retry in a moment.`,
+        );
+      }
+      return;
+    }
+
+    // Flag on → show 2-button keyboard. The URL is stored in the bot's
+    // keyboard-message text (parsed back out by the callback handler);
+    // callback_data carries only `am:<requestId>:<p|s>` to stay under
+    // Telegram's 64-byte callback_data cap.
+    const keyboard = new InlineKeyboard()
+      .text("💸 Public ($0.15)", `am:${requestId}:p`)
+      .text("🔒 Confidential ($0.15)", `am:${requestId}:s`);
     await safeReply(
       ctx,
-      `🧠 Starting analysis (request \`${requestId}\`) — result in ~60 seconds. You can leave the chat; we'll DM you when it's done.`,
+      `🧠 *Analyze* request \`${requestId}\`\nMarket: \`${url}\`\n\nChoose payment mode:`,
+      { parse_mode: "Markdown", reply_markup: keyboard },
     );
+  });
+
+  // Inline-keyboard callback for /analyze mode selection.
+  bot.on("callback_query:data", async (ctx, next) => {
+    const data = ctx.callbackQuery.data;
+    if (!data.startsWith("am:")) return next();
+    const u = ctx.from;
+    const chatId = ctx.chat?.id;
+    if (!u || chatId === undefined) {
+      await ctx.answerCallbackQuery({ text: "Missing user/chat info." });
+      return;
+    }
+    const parts = data.split(":");
+    if (parts.length !== 3) {
+      await ctx.answerCallbackQuery({ text: "Malformed callback." });
+      return;
+    }
+    const [, requestId, modeFlag] = parts;
+    const paymentMode = modeFlag === "p" ? "public" : "shielded";
+    // Recover the market URL from the keyboard message text (line "Market: `<url>`").
+    const text = ctx.callbackQuery.message?.text ?? "";
+    const m = /Market:\s+([^\s]+)/.exec(text);
+    if (!m) {
+      await ctx.answerCallbackQuery({
+        text: "Couldn't recover the URL — please /analyze again.",
+      });
+      return;
+    }
+    const marketUrl = m[1]!;
+
+    await ctx.answerCallbackQuery({ text: `Dispatching ${paymentMode} mode…` });
+    try {
+      // Replace the keyboard with a status line so the user knows the
+      // choice was committed and the buttons can no longer be tapped.
+      await ctx.editMessageText(
+        `🧠 *Analyze* request \`${requestId}\` — ${paymentMode} mode dispatched. Result in ~60s.`,
+        { parse_mode: "Markdown" },
+      );
+    } catch {
+      // Editing can fail if the message is too old; non-fatal.
+    }
 
     try {
       await dispatchAnalyzeJob({
         env: ctx.env,
         chatId,
         telegramUserId: u.id,
-        marketUrl: url,
-        requestId,
+        marketUrl,
+        requestId: requestId!,
+        paymentMode,
       });
     } catch (e) {
-      await safeReply(
-        ctx,
-        `❌ Couldn't reach the analyzer (request \`${requestId}\`): ${(e as Error).message}\n\nThis is an infrastructure issue, not a problem with your wallet. Retry in a moment.`,
+      await ctx.api.sendMessage(
+        chatId,
+        `❌ Couldn't reach the analyzer (request \`${requestId}\`): ${(e as Error).message}`,
+        { parse_mode: "Markdown" },
       );
     }
   });
@@ -257,11 +338,15 @@ Confidential payments (experimental):
   return bot;
 }
 
-async function safeReply(ctx: Context, text: string): Promise<void> {
+async function safeReply(
+  ctx: Context,
+  text: string,
+  extra?: Parameters<Context["reply"]>[1],
+): Promise<void> {
   try {
-    await ctx.reply(text, { parse_mode: "Markdown" });
+    await ctx.reply(text, { parse_mode: "Markdown", ...(extra ?? {}) });
   } catch {
-    await ctx.reply(text);
+    await ctx.reply(text, extra);
   }
 }
 

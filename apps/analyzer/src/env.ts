@@ -76,6 +76,9 @@ export function loadEnv(): AnalyzerEnv {
     STOA_OPERATOR_STABLETRUST_PRIVATE_KEY: readOptional(
       "STOA_OPERATOR_STABLETRUST_PRIVATE_KEY",
     ),
+    STABLETRUST_ARC_CONTRACT_ADDRESS: readOptional(
+      "STABLETRUST_ARC_CONTRACT_ADDRESS",
+    ),
   };
 
   return {

@@ -37,7 +37,7 @@ STOA_FEE_CONFIRM_USDC = "200000"
 # return a "feature not enabled" message and /analyze + /confirm use the
 # public StoaSettler atomic flow exclusively. Flip to "true" only after
 # running apps/analyzer/scripts/test-stabletrust.ts successfully.
-STOA_USE_STABLETRUST = "false"
+STOA_USE_STABLETRUST = "true"
 FAIRBLOCK_API_URL = "https://stabletrust-api.fairblock.network"
 # Defaults to ARC_USDC when empty.
 STABLETRUST_ARC_USDC_ADDRESS = ""
