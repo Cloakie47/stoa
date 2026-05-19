@@ -14,6 +14,7 @@ import {
 
 const FAKE_USDC = "0x3600000000000000000000000000000000000000";
 const FAKE_PK = "0x" + "ab".repeat(32);
+const FAKE_CHAIN_ID = 5042002;
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -37,10 +38,11 @@ describe("StableTrustClient URL construction", () => {
       privateKey: FAKE_PK,
       tokenAddress: FAKE_USDC,
       amount: "1000000",
+      chainId: FAKE_CHAIN_ID,
     });
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url] = fetchImpl.mock.calls[0]!;
-    expect(url).toBe("https://example.com/deposit-to-shield");
+    expect(url).toBe("https://example.com/deposit");
   });
 
   it("sends correct POST body with finalization default true", async () => {
@@ -53,6 +55,7 @@ describe("StableTrustClient URL construction", () => {
       recipientAddress: "0xabc",
       tokenAddress: FAKE_USDC,
       amount: "150000",
+      chainId: FAKE_CHAIN_ID,
     });
     const [, init] = fetchImpl.mock.calls[0]!;
     expect(init.method).toBe("POST");
@@ -65,6 +68,7 @@ describe("StableTrustClient URL construction", () => {
       recipientAddress: "0xabc",
       tokenAddress: FAKE_USDC,
       amount: "150000",
+      chainId: FAKE_CHAIN_ID,
       useOffchainVerify: false,
       waitForFinalization: true,
     });
@@ -79,7 +83,11 @@ describe("StableTrustClient URL construction", () => {
       fetchImpl,
       endpoints: { getShieldedBalance: "/v2/balance" },
     });
-    await c.getShieldedBalance({ privateKey: FAKE_PK, tokenAddress: FAKE_USDC });
+    await c.getShieldedBalance({
+      privateKey: FAKE_PK,
+      tokenAddress: FAKE_USDC,
+      chainId: FAKE_CHAIN_ID,
+    });
     expect(fetchImpl.mock.calls[0]![0]).toBe("https://x.test/v2/balance");
   });
 });
@@ -97,6 +105,7 @@ describe("StableTrustClient error handling", () => {
         privateKey: FAKE_PK,
         tokenAddress: FAKE_USDC,
         amount: "0",
+        chainId: FAKE_CHAIN_ID,
       }),
     ).rejects.toMatchObject({
       name: "StableTrustError",
@@ -111,7 +120,11 @@ describe("StableTrustClient error handling", () => {
       .mockResolvedValue(new Response("", { status: 502 }));
     const c = new StableTrustClient({ baseUrl: "https://x.test", fetchImpl });
     await expect(
-      c.getShieldedBalance({ privateKey: FAKE_PK, tokenAddress: FAKE_USDC }),
+      c.getShieldedBalance({
+        privateKey: FAKE_PK,
+        tokenAddress: FAKE_USDC,
+        chainId: FAKE_CHAIN_ID,
+      }),
     ).rejects.toMatchObject({
       name: "StableTrustError",
       status: 502,
@@ -128,6 +141,7 @@ describe("StableTrustClient error handling", () => {
     const res = await c.getShieldedBalance({
       privateKey: FAKE_PK,
       tokenAddress: FAKE_USDC,
+      chainId: FAKE_CHAIN_ID,
     });
     expect(res).toEqual(balance);
   });
@@ -145,7 +159,11 @@ describe("circuit breaker", () => {
       .mockImplementation(async () => jsonResponse(500, { message: "down" }));
     const c = new StableTrustClient({ baseUrl: "https://x.test", fetchImpl });
     const call = () =>
-      c.getShieldedBalance({ privateKey: FAKE_PK, tokenAddress: FAKE_USDC });
+      c.getShieldedBalance({
+        privateKey: FAKE_PK,
+        tokenAddress: FAKE_USDC,
+        chainId: FAKE_CHAIN_ID,
+      });
 
     await expect(call()).rejects.toBeInstanceOf(StableTrustError);
     await expect(call()).rejects.toBeInstanceOf(StableTrustError);
@@ -163,7 +181,11 @@ describe("circuit breaker", () => {
       .mockImplementation(async () => jsonResponse(500, { message: "down" }));
     const c = new StableTrustClient({ baseUrl: "https://x.test", fetchImpl });
     const call = () =>
-      c.getShieldedBalance({ privateKey: FAKE_PK, tokenAddress: FAKE_USDC });
+      c.getShieldedBalance({
+        privateKey: FAKE_PK,
+        tokenAddress: FAKE_USDC,
+        chainId: FAKE_CHAIN_ID,
+      });
 
     await expect(call()).rejects.toBeInstanceOf(StableTrustError);
     await expect(call()).rejects.toBeInstanceOf(StableTrustError);
@@ -187,7 +209,11 @@ describe("circuit breaker", () => {
       );
     const c = new StableTrustClient({ baseUrl: "https://x.test", fetchImpl });
     const call = () =>
-      c.getShieldedBalance({ privateKey: FAKE_PK, tokenAddress: FAKE_USDC });
+      c.getShieldedBalance({
+        privateKey: FAKE_PK,
+        tokenAddress: FAKE_USDC,
+        chainId: FAKE_CHAIN_ID,
+      });
 
     await expect(call()).rejects.toBeInstanceOf(StableTrustError);
     await expect(call()).rejects.toBeInstanceOf(StableTrustError);

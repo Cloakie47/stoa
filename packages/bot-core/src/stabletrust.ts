@@ -120,6 +120,13 @@ export async function pinTraceFromOperator(args: {
   return txHash;
 }
 
+/** Numeric chain ID for StableTrust calls — pulled from BotCoreConfig
+ *  so the same wrapper works regardless of whether the operator runs
+ *  Stoa on Arc Testnet (5042002) or any future supported chain. */
+function chainIdOf(cfg: BotCoreConfig): number {
+  return Number(cfg.ARC_CHAIN_ID);
+}
+
 /** Public → shielded balance (user-side /shield command). */
 export async function shieldDeposit(args: {
   cfg: BotCoreConfig;
@@ -131,6 +138,7 @@ export async function shieldDeposit(args: {
     privateKey: args.userPrivateKey,
     tokenAddress: args.cfg.STABLETRUST_ARC_USDC_ADDRESS,
     amount: args.amountMicros.toString(),
+    chainId: chainIdOf(args.cfg),
     waitForFinalization: true,
   });
 }
@@ -144,6 +152,7 @@ export async function shieldedBalanceOf(args: {
   return client.getShieldedBalance({
     privateKey: args.userPrivateKey,
     tokenAddress: args.cfg.STABLETRUST_ARC_USDC_ADDRESS,
+    chainId: chainIdOf(args.cfg),
   });
 }
 
@@ -158,6 +167,7 @@ export async function shieldWithdraw(args: {
     privateKey: args.userPrivateKey,
     tokenAddress: args.cfg.STABLETRUST_ARC_USDC_ADDRESS,
     amount: args.amountMicros.toString(),
+    chainId: chainIdOf(args.cfg),
     waitForFinalization: true,
   });
 }
@@ -174,6 +184,7 @@ export async function confidentialFeeTransfer(args: {
     recipientAddress: operatorShieldedRecipient(args.cfg),
     tokenAddress: args.cfg.STABLETRUST_ARC_USDC_ADDRESS,
     amount: args.amountMicros.toString(),
+    chainId: chainIdOf(args.cfg),
     useOffchainVerify: false,
     waitForFinalization: true,
   });

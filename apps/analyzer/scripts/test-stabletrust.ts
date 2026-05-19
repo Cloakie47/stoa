@@ -33,6 +33,7 @@ const RECIPIENT = required("TEST_RECIPIENT_ADDRESS");
 const DEPOSIT_AMOUNT = "1000000"; // 1.0 USDC (6 decimals)
 const TRANSFER_AMOUNT = "500000"; // 0.5 USDC
 const WITHDRAW_AMOUNT = "500000"; // 0.5 USDC
+const CHAIN_ID = Number(process.env.ARC_CHAIN_ID ?? "5042002");
 
 function required(name: string): string {
   const v = process.env[name];
@@ -64,7 +65,7 @@ async function main(): Promise<void> {
   // ── Step 1: initial balance read ────────────────────────────────────────
   console.log(`[1/10] Reading initial shielded balance...`);
   const before = await client
-    .getShieldedBalance({ privateKey: USER_PK, tokenAddress: TOKEN })
+    .getShieldedBalance({ privateKey: USER_PK, tokenAddress: TOKEN, chainId: CHAIN_ID })
     .catch((e: Error) => fail(`getShieldedBalance failed: ${e.message}`));
   console.log(
     `       total=$${fmtBalance(before.balance.total)} ` +
@@ -79,6 +80,7 @@ async function main(): Promise<void> {
       privateKey: USER_PK,
       tokenAddress: TOKEN,
       amount: DEPOSIT_AMOUNT,
+      chainId: CHAIN_ID,
       waitForFinalization: true,
     })
     .catch((e: Error) => fail(`depositToShield failed: ${e.message}`));
@@ -87,7 +89,7 @@ async function main(): Promise<void> {
   // ── Step 3: balance after deposit ───────────────────────────────────────
   console.log(`[3/10] Reading shielded balance after deposit...`);
   const afterDeposit = await client
-    .getShieldedBalance({ privateKey: USER_PK, tokenAddress: TOKEN })
+    .getShieldedBalance({ privateKey: USER_PK, tokenAddress: TOKEN, chainId: CHAIN_ID })
     .catch((e: Error) => fail(`getShieldedBalance (post-deposit) failed: ${e.message}`));
   console.log(
     `       total=$${fmtBalance(afterDeposit.balance.total)} ` +
@@ -110,6 +112,7 @@ async function main(): Promise<void> {
       recipientAddress: RECIPIENT,
       tokenAddress: TOKEN,
       amount: TRANSFER_AMOUNT,
+      chainId: CHAIN_ID,
       useOffchainVerify: false,
       waitForFinalization: true,
     })
@@ -119,7 +122,7 @@ async function main(): Promise<void> {
   // ── Step 5: balance after transfer ──────────────────────────────────────
   console.log(`[5/10] Reading shielded balance after transfer...`);
   const afterTransfer = await client
-    .getShieldedBalance({ privateKey: USER_PK, tokenAddress: TOKEN })
+    .getShieldedBalance({ privateKey: USER_PK, tokenAddress: TOKEN, chainId: CHAIN_ID })
     .catch((e: Error) => fail(`getShieldedBalance (post-transfer) failed: ${e.message}`));
   console.log(
     `       total=$${fmtBalance(afterTransfer.balance.total)} ` +
@@ -142,6 +145,7 @@ async function main(): Promise<void> {
       privateKey: USER_PK,
       tokenAddress: TOKEN,
       amount: WITHDRAW_AMOUNT,
+      chainId: CHAIN_ID,
       useOffchainVerify: false,
       waitForFinalization: true,
     })
@@ -151,7 +155,7 @@ async function main(): Promise<void> {
   // ── Step 7: balance after withdraw ──────────────────────────────────────
   console.log(`[7/10] Reading shielded balance after withdraw...`);
   const afterWithdraw = await client
-    .getShieldedBalance({ privateKey: USER_PK, tokenAddress: TOKEN })
+    .getShieldedBalance({ privateKey: USER_PK, tokenAddress: TOKEN, chainId: CHAIN_ID })
     .catch((e: Error) => fail(`getShieldedBalance (post-withdraw) failed: ${e.message}`));
   console.log(
     `       total=$${fmtBalance(afterWithdraw.balance.total)} ` +

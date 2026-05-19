@@ -18,13 +18,14 @@ import { guard } from "./circuit-breaker.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-/** REST paths the client POSTs to. Exported so callers can patch them if
- *  Fairblock's actual paths drift from REST convention. */
+/** REST paths the client POSTs to, per Fairblock's API docs at
+ *  https://stabletrust-docs.fairblock.network/api. Exported so callers
+ *  can patch them if Fairblock ships a versioned URL pattern later. */
 export const STABLETRUST_ENDPOINTS = {
-  depositToShield: "/deposit-to-shield",
-  getShieldedBalance: "/get-shielded-balance",
-  confidentialTransfer: "/confidential-transfer",
-  withdrawToPublic: "/withdraw-to-public",
+  depositToShield: "/deposit",
+  getShieldedBalance: "/balance",
+  confidentialTransfer: "/transfer",
+  withdrawToPublic: "/withdraw",
 } as const;
 
 export interface StableTrustClientOptions {
@@ -42,12 +43,17 @@ export interface DepositArgs {
   privateKey: string;
   tokenAddress: string;
   amount: string;
+  /** Numeric chain ID the API should route the on-chain side of the
+   *  deposit to. Required since Fairblock supports multiple networks
+   *  and the HTTP API does not infer the chain from tokenAddress alone. */
+  chainId: number;
   waitForFinalization?: boolean;
 }
 
 export interface BalanceArgs {
   privateKey: string;
   tokenAddress: string;
+  chainId: number;
   address?: string;
 }
 
@@ -64,6 +70,7 @@ export interface TransferArgs {
   recipientAddress: string;
   tokenAddress: string;
   amount: string;
+  chainId: number;
   useOffchainVerify?: boolean;
   waitForFinalization?: boolean;
 }
@@ -72,6 +79,7 @@ export interface WithdrawArgs {
   privateKey: string;
   tokenAddress: string;
   amount: string;
+  chainId: number;
   useOffchainVerify?: boolean;
   waitForFinalization?: boolean;
 }
@@ -98,6 +106,7 @@ export class StableTrustClient {
       privateKey: args.privateKey,
       tokenAddress: args.tokenAddress,
       amount: args.amount,
+      chainId: args.chainId,
       waitForFinalization: args.waitForFinalization ?? true,
     });
   }
@@ -106,6 +115,7 @@ export class StableTrustClient {
     return this.post<BalanceResponse>(this.endpoints.getShieldedBalance, {
       privateKey: args.privateKey,
       tokenAddress: args.tokenAddress,
+      chainId: args.chainId,
       ...(args.address ? { address: args.address } : {}),
     });
   }
@@ -116,6 +126,7 @@ export class StableTrustClient {
       recipientAddress: args.recipientAddress,
       tokenAddress: args.tokenAddress,
       amount: args.amount,
+      chainId: args.chainId,
       useOffchainVerify: args.useOffchainVerify ?? false,
       waitForFinalization: args.waitForFinalization ?? true,
     });
@@ -126,6 +137,7 @@ export class StableTrustClient {
       privateKey: args.privateKey,
       tokenAddress: args.tokenAddress,
       amount: args.amount,
+      chainId: args.chainId,
       useOffchainVerify: args.useOffchainVerify ?? false,
       waitForFinalization: args.waitForFinalization ?? true,
     });
