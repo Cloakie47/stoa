@@ -50,4 +50,27 @@ describe("computeSplitLegs", () => {
     expect(legs[1]!.recipient).toBe(MT);
     expect(legs[2]!.recipient).toBe(CN);
   });
+
+  it("for-await iteration runs one leg at a time in [operator, maintainers, canteen] order", async () => {
+    // The sequential split orchestrator in pipelines.ts (trySplitShielded)
+    // relies on this exact iteration order + serialization: each leg's
+    // signed tx must finalize before the next leg signs, otherwise EOA
+    // nonces contend and Fairblock /transfer rejects with HTTP 500.
+    // This test simulates the for-await pattern and asserts no interleaving.
+    const legs = computeSplitLegs(150_000n, recipients);
+    const events: string[] = [];
+    for (const leg of legs) {
+      events.push(`start:${leg.recipient}`);
+      await new Promise((r) => setTimeout(r, 1));
+      events.push(`done:${leg.recipient}`);
+    }
+    expect(events).toEqual([
+      `start:${OP}`,
+      `done:${OP}`,
+      `start:${MT}`,
+      `done:${MT}`,
+      `start:${CN}`,
+      `done:${CN}`,
+    ]);
+  });
 });

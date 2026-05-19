@@ -249,34 +249,38 @@ async function trySplitShielded(args: {
     }
   }
 
-  // ── Three parallel confidential transfers with per-leg retry ────────────
-  const settled = await Promise.allSettled(
-    legs.map((leg) =>
-      sendLegWithRetry({
+  // ── Three SEQUENTIAL confidential transfers with per-leg retry ──────────
+  // Parallel execution (Promise.allSettled) was empirically tripping
+  // Fairblock's /transfer endpoint with HTTP 500s on 2 of 3 legs, almost
+  // certainly because the sender EOA nonce contends when three signed
+  // transactions race from the same key. Sequential execution serializes
+  // the nonce naturally: leg N waits for leg N-1's tx to finalize (the
+  // client uses waitForFinalization=true) before the next call signs.
+  // Per-leg retry (1s/2s exponential backoff) inside sendLegWithRetry is
+  // unchanged, as is the V1 fall-through-to-public policy below.
+  const splits: SplitLegResult[] = [];
+  for (const leg of legs) {
+    try {
+      const txHash = await sendLegWithRetry({
         cfg,
         userPrivateKey: wallet.privateKey,
         leg,
-      }),
-    ),
-  );
-
-  const splits: SplitLegResult[] = legs.map((leg, i) => {
-    const r = settled[i]!;
-    if (r.status === "fulfilled") {
-      return {
+      });
+      splits.push({
         recipient: leg.recipient,
         amount_micros: leg.amount_micros,
-        tx_hash: r.value,
+        tx_hash: txHash,
         ok: true,
-      };
+      });
+    } catch {
+      splits.push({
+        recipient: leg.recipient,
+        amount_micros: leg.amount_micros,
+        tx_hash: null,
+        ok: false,
+      });
     }
-    return {
-      recipient: leg.recipient,
-      amount_micros: leg.amount_micros,
-      tx_hash: null,
-      ok: false,
-    };
-  });
+  }
 
   const failedLegs = splits.filter((s) => !s.ok);
   if (failedLegs.length > 0) {
@@ -292,7 +296,7 @@ async function trySplitShielded(args: {
       )
       .join(" ");
     console.warn(
-      `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+      `[stabletrust] mode=public execution=sequential user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
         `reason=shielded_partial_failure legs=[${failedDescriptions}] request=${requestId}`,
     );
     return null;
@@ -302,7 +306,7 @@ async function trySplitShielded(args: {
   const operatorTx = splits[0]!.tx_hash as Hex;
   await db.logFeeChargeMined(feeId, operatorTx);
   console.log(
-    `[stabletrust] mode=shielded user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+    `[stabletrust] mode=shielded execution=sequential user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
       `shielded_before=$${(Number(availableMicros) / 1e6).toFixed(2)} ` +
       `shielded_after=$${(Number(availableMicros - feeMicros) / 1e6).toFixed(2)} ` +
       `op_tx=${operatorTx} maint_tx=${splits[1]!.tx_hash} canteen_tx=${splits[2]!.tx_hash} ` +
