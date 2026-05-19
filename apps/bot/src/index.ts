@@ -18,6 +18,11 @@ import { Bot, InlineKeyboard, webhookCallback, type Context } from "grammy";
 import { dispatchAnalyzeJob } from "./commands/analyze.js";
 import { handleBalance } from "./commands/balance.js";
 import { dispatchConfirmJob } from "./commands/confirm.js";
+import {
+  cancelPendingExportForUser,
+  handleExportKeyConfirm,
+  handleExportKeyStart,
+} from "./commands/export_key.js";
 import { handlePositions } from "./commands/positions.js";
 import { handlePreview } from "./commands/preview.js";
 import { handleShield } from "./commands/shield.js";
@@ -36,6 +41,24 @@ function makeBot(env: Env): Bot {
   // run. Order-sensitive: must come before `bot.command(...)` registrations.
   bot.use(async (ctx, next) => {
     ctx.env = env;
+    await next();
+  });
+
+  // Cancel any pending /export_key confirmation if the user sends ANY
+  // message that is neither /export_key (which would re-open the window)
+  // nor /export_key_confirm (which would consume it). Must run BEFORE the
+  // command handlers so the cancellation is visible when those handlers
+  // do their work. The actual command handlers proceed normally — this
+  // middleware only invalidates the export-key pending state.
+  bot.use(async (ctx, next) => {
+    const text = ctx.message?.text;
+    const fromId = ctx.from?.id;
+    if (text && fromId !== undefined) {
+      const cmd = text.split(/\s+/, 1)[0] ?? "";
+      if (cmd !== "/export_key" && cmd !== "/export_key_confirm") {
+        cancelPendingExportForUser(fromId);
+      }
+    }
     await next();
   });
 
@@ -316,23 +339,67 @@ function makeBot(env: Env): Bot {
     }
   });
 
-  bot.command("help", async (ctx) => {
-    const base = `Stoa InsightAgent commands:
-/start — create your wallet, see funding addresses
-/preview <url> — free one-shot summary
-/analyze <url> — $0.15, multi-agent analysis + trace pin
-/confirm <orderId> — $0.20, execute the trade (mocked v0)
-/balance — your USDC on Arc + Base
-/positions — your open orders
-/withdraw <addr> <amount> — exit any time`;
-    const shielded = `
+  // /export_key — two-step private-key recovery. DM-only.
+  bot.command("export_key", async (ctx) => {
+    const u = ctx.from;
+    if (!u) return safeReply(ctx, "Missing user info.");
+    const chatType = ctx.chat?.type ?? "";
+    const res = handleExportKeyStart({
+      db: ctx.env.DB,
+      env: ctx.env,
+      telegramUserId: u.id,
+      chatType,
+    });
+    await safeReply(ctx, res.message);
+  });
 
-Confidential payments (experimental):
-/shield <amount> — move USDC into your confidential balance
-/unshield <amount> — move it back to your public wallet
-/shielded_balance — read your confidential balance`;
-    const cfg = toCfg(ctx.env);
-    await safeReply(ctx, cfg.STOA_USE_STABLETRUST ? base + shielded : base);
+  bot.command("export_key_confirm", async (ctx) => {
+    const u = ctx.from;
+    if (!u) return safeReply(ctx, "Missing user info.");
+    const chatType = ctx.chat?.type ?? "";
+    try {
+      const res = await handleExportKeyConfirm({
+        db: ctx.env.DB,
+        env: ctx.env,
+        telegramUserId: u.id,
+        chatType,
+      });
+      await safeReply(ctx, res.message);
+    } catch (e) {
+      // Never include the underlying error message in the reply — error
+      // texts from crypto failures can leak fragments of the ciphertext.
+      console.warn(
+        `[export_key_confirm] failed for user ${u.id}: ${(e as Error).message}`,
+      );
+      await safeReply(
+        ctx,
+        "❌ Could not export your key right now. Please retry /export_key.",
+      );
+    }
+  });
+
+  bot.command("help", async (ctx) => {
+    const text = `Stoa InsightAgent commands:
+
+  Wallet
+  /start — create your wallet, see funding addresses
+  /balance — your USDC on Arc + Base
+  /export_key — recover your private key (DM only)
+
+  Analysis
+  /preview <url> — free one-shot summary
+  /analyze <url> — $0.15, multi-agent analysis + trace pin
+  /positions — your open orders
+  /confirm <orderId> — $0.20, execute the trade (mocked v0)
+
+  Confidential payments
+  /shield <amount> — deposit USDC to shielded balance
+  /unshield <amount> — withdraw shielded balance to public
+  /shielded_balance — check your shielded balance
+
+  Exit
+  /withdraw <addr> <amount> — withdraw any time`;
+    await safeReply(ctx, text);
   });
 
   return bot;

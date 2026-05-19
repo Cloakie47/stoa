@@ -15,6 +15,19 @@ export { arcTestnet, base, arcRpc, baseRpc } from "./chains.js";
 export { encryptPrivateKey, decryptPrivateKey } from "./crypto.js";
 
 export {
+  makePendingExportStore,
+  openPendingExport,
+  consumePendingExport,
+  cancelPendingExport,
+  hasPendingExport,
+  realClock,
+  EXPORT_CONFIRM_TTL_MS,
+  type PendingExportStore,
+  type ExportKeyClock,
+  type ConsumeResult,
+} from "./export-key-state.js";
+
+export {
   getOrCreateUserWallet,
   loadUserWallet,
   readUsdcBalanceArc,
