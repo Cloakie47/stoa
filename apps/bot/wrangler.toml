@@ -32,6 +32,16 @@ BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 STOA_FEE_ANALYZE_USDC = "150000"
 STOA_FEE_CONFIRM_USDC = "200000"
 
+# ── Fairblock StableTrust (experimental, default off) ─────────────────────
+# Master kill-switch. When "false", /shield, /unshield, /shielded-balance
+# return a "feature not enabled" message and /analyze + /confirm use the
+# public StoaSettler atomic flow exclusively. Flip to "true" only after
+# running apps/analyzer/scripts/test-stabletrust.ts successfully.
+STOA_USE_STABLETRUST = "false"
+FAIRBLOCK_API_URL = "https://stabletrust-api.fairblock.network"
+# Defaults to ARC_USDC when empty.
+STABLETRUST_ARC_USDC_ADDRESS = ""
+
 # ── Secrets (set via wrangler secret put NAME) ──────────────────────────────
 # Required:
 #   TELEGRAM_BOT_TOKEN          - get from @BotFather on Telegram
@@ -57,3 +67,9 @@ STOA_FEE_CONFIRM_USDC = "200000"
 #   LIMITLESS_TOKEN_SECRET      - scoped Limitless API token secret
 #   TEST_USER_TG_ID             - for simulator: a Telegram id to seed as the test user
 #   TEST_USER_PRIVATE_KEY       - for simulator: hardcoded test wallet PK (Arc + Base)
+#   STOA_OPERATOR_STABLETRUST_PRIVATE_KEY
+#                               - Optional. When set, used as the recipient of
+#                                 confidential /analyze + /confirm fees. When
+#                                 unset, the V1 default derives the recipient
+#                                 from OPERATOR_PRIVATE_KEY (same key receives
+#                                 both public and shielded fees).

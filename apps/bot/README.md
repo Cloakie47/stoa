@@ -149,3 +149,85 @@ for the full architectural record.
 3. Optionally send some USDC on Base for the `/withdraw` smoke test.
 4. Put the PK in `.env` as `TEST_USER_PRIVATE_KEY` (NEVER commit).
 5. Run `pnpm simulate`.
+
+## Confidential payments (experimental)
+
+Stoa optionally charges `/analyze` ($0.15) and `/confirm` ($0.20) fees
+*confidentially* via [Fairblock StableTrust](https://stabletrust-docs.fairblock.network/api).
+The feature is **off by default** behind the `STOA_USE_STABLETRUST`
+wrangler var; flip it to `"true"` only after the integration test below
+runs green on the operator's Arc Testnet wallet.
+
+### What changes when the flag is on
+
+* **Three new commands**:
+  * `/shield <amount>` — move USDC from the user's public Arc balance into
+    their confidential StableTrust balance.
+  * `/unshield <amount>` — move it back.
+  * `/shielded_balance` — read the current confidential balance. (Note:
+    Telegram command names use underscores, not hyphens.)
+* **`/analyze` + `/confirm` payment routing**: when the user has enough
+  shielded balance, the fee is charged via a user→operator *confidential
+  transfer* through the Fairblock API. The 70/20/10 atomic split is
+  **skipped** in this mode — the operator's StableTrust balance accumulates
+  the fees and the split is performed manually post-flow (V1 trade-off).
+* **TracePin decoupling**: in shielded mode the `TracePin.pinTrace(...)`
+  emission is a *separate* Arc tx, signed by the operator key, not bundled
+  into the user's payment. That decouples the on-chain trace from the
+  encrypted fee transfer so the analysis is not attributable to any
+  specific user.
+* **Telegram footer** branches:
+  * Public flow (default): `Request <id> — $0.15 charged, split 70/20/10 atomic on Arc.`
+  * Shielded flow: `Request <id> — $0.15 charged confidentially via Fairblock StableTrust. [Confidential tx](...)`
+
+### Fall-back behavior
+
+The shielded path **never crashes the user-facing flow**. Any of:
+1. user has insufficient shielded balance,
+2. Fairblock API returns a non-2xx,
+3. circuit breaker is open (3+ consecutive failures within 60s),
+4. circuit breaker fail-fast (the next 5 minutes after tripping),
+
+→ falls through to the existing public StoaSettler flow with no
+visible difference to the user. Distinguishable in the operator's logs
+via the `[stabletrust] mode=public reason=<…>` line.
+
+### Integration test (REQUIRED before flipping the flag)
+
+```bash
+cd apps/analyzer
+
+# Required for the test:
+export TEST_USER_PRIVATE_KEY=0x...     # ≥ $1.6 public USDC on Arc Testnet
+export TEST_RECIPIENT_ADDRESS=0x...    # second test wallet (any address)
+
+# Optional (defaults shown):
+# export FAIRBLOCK_API_URL=https://stabletrust-api.fairblock.network
+# export STABLETRUST_ARC_USDC_ADDRESS=0x3600000000000000000000000000000000000000
+
+npx tsx scripts/test-stabletrust.ts
+```
+
+The script runs ten steps end-to-end: `getShieldedBalance` →
+`depositToShield 1 USDC` → balance check → `confidentialTransfer 0.5 USDC`
+→ balance check → `withdrawToPublic 0.5 USDC` → balance check → schema
+asserts. Exits 1 with the failing-step's error on any failure.
+
+### Enabling
+
+After the integration test runs green, flip the var:
+
+```bash
+# In apps/bot/wrangler.toml [vars] section, change to:
+STOA_USE_STABLETRUST = "true"
+
+# On Railway, set the env var:
+STOA_USE_STABLETRUST=true
+
+# Optionally also set the dedicated operator shielded-receipt key:
+# (when unset, the V1 default uses OPERATOR_PRIVATE_KEY's address)
+wrangler secret put STOA_OPERATOR_STABLETRUST_PRIVATE_KEY
+```
+
+Redeploy the Worker and Railway analyzer; existing public-flow users
+continue uninterrupted.

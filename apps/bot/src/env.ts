@@ -51,6 +51,19 @@ export interface Env {
   LIMITLESS_TOKEN_SECRET?: string;
   TEST_USER_TG_ID?: string;
   TEST_USER_PRIVATE_KEY?: string;
+
+  // ── Fairblock StableTrust (experimental, default off) ────────────────────
+  // The Worker reads STOA_USE_STABLETRUST + FAIRBLOCK_API_URL +
+  // STABLETRUST_ARC_USDC_ADDRESS from [vars] in wrangler.toml.
+  // STOA_OPERATOR_STABLETRUST_PRIVATE_KEY is an optional secret — when
+  // unset, the V1 default derives the confidential receiver from
+  // OPERATOR_PRIVATE_KEY. The Worker uses the flag to gate /shield,
+  // /unshield, and /shielded-balance commands; the actual confidential
+  // fee charging happens in the Railway analyzer.
+  STOA_USE_STABLETRUST?: string;
+  FAIRBLOCK_API_URL?: string;
+  STABLETRUST_ARC_USDC_ADDRESS?: string;
+  STOA_OPERATOR_STABLETRUST_PRIVATE_KEY?: string;
 }
 
 /**
@@ -81,6 +94,20 @@ export function toCfg(env: Env): BotCoreConfig {
     PINATA_JWT: env.PINATA_JWT,
     LIMITLESS_TOKEN_ID: env.LIMITLESS_TOKEN_ID,
     LIMITLESS_TOKEN_SECRET: env.LIMITLESS_TOKEN_SECRET,
+    STOA_USE_STABLETRUST: /^(true|1|yes)$/i.test(
+      (env.STOA_USE_STABLETRUST ?? "").trim(),
+    ),
+    FAIRBLOCK_API_URL:
+      env.FAIRBLOCK_API_URL && env.FAIRBLOCK_API_URL.length > 0
+        ? env.FAIRBLOCK_API_URL
+        : "https://stabletrust-api.fairblock.network",
+    STABLETRUST_ARC_USDC_ADDRESS:
+      env.STABLETRUST_ARC_USDC_ADDRESS &&
+      env.STABLETRUST_ARC_USDC_ADDRESS.length > 0
+        ? env.STABLETRUST_ARC_USDC_ADDRESS
+        : env.ARC_USDC,
+    STOA_OPERATOR_STABLETRUST_PRIVATE_KEY:
+      env.STOA_OPERATOR_STABLETRUST_PRIVATE_KEY,
   };
 }
 

@@ -20,9 +20,12 @@ import { handleBalance } from "./commands/balance.js";
 import { dispatchConfirmJob } from "./commands/confirm.js";
 import { handlePositions } from "./commands/positions.js";
 import { handlePreview } from "./commands/preview.js";
+import { handleShield } from "./commands/shield.js";
+import { handleShieldedBalance } from "./commands/shielded_balance.js";
 import { handleStart } from "./commands/start.js";
+import { handleUnshield } from "./commands/unshield.js";
 import { handleWithdraw } from "./commands/withdraw.js";
-import type { Env } from "./env.js";
+import { toCfg, type Env } from "./env.js";
 import { handleInternalDb } from "./internal.js";
 import type { ExecutionContext } from "@cloudflare/workers-types";
 
@@ -175,19 +178,81 @@ function makeBot(env: Env): Bot {
     }
   });
 
-  bot.command("help", async (ctx) =>
-    safeReply(
-      ctx,
-      `Stoa InsightAgent commands:
+  // ── Confidential-payment commands (experimental, feature-gated) ──────────
+  // Each handler checks STOA_USE_STABLETRUST internally and returns a
+  // "feature not enabled" message when off — registration is unconditional
+  // so the bot doesn't return Telegram's default "command unknown" error
+  // and operators can flip the flag without redeploying the Worker.
+  bot.command("shield", async (ctx) => {
+    const u = ctx.from;
+    if (!u) return safeReply(ctx, "Missing user info.");
+    const amt = Number.parseFloat(ctx.match.trim());
+    try {
+      const res = await handleShield({
+        db: ctx.env.DB,
+        env: ctx.env,
+        telegramUserId: u.id,
+        amountUsdc: amt,
+      });
+      await safeReply(ctx, res.message);
+    } catch (e) {
+      await safeReply(ctx, `❌ /shield failed: ${(e as Error).message}`);
+    }
+  });
+
+  bot.command("unshield", async (ctx) => {
+    const u = ctx.from;
+    if (!u) return safeReply(ctx, "Missing user info.");
+    const amt = Number.parseFloat(ctx.match.trim());
+    try {
+      const res = await handleUnshield({
+        db: ctx.env.DB,
+        env: ctx.env,
+        telegramUserId: u.id,
+        amountUsdc: amt,
+      });
+      await safeReply(ctx, res.message);
+    } catch (e) {
+      await safeReply(ctx, `❌ /unshield failed: ${(e as Error).message}`);
+    }
+  });
+
+  bot.command("shielded_balance", async (ctx) => {
+    const u = ctx.from;
+    if (!u) return safeReply(ctx, "Missing user info.");
+    try {
+      const res = await handleShieldedBalance({
+        db: ctx.env.DB,
+        env: ctx.env,
+        telegramUserId: u.id,
+      });
+      await safeReply(ctx, res.message);
+    } catch (e) {
+      await safeReply(
+        ctx,
+        `❌ /shielded_balance failed: ${(e as Error).message}`,
+      );
+    }
+  });
+
+  bot.command("help", async (ctx) => {
+    const base = `Stoa InsightAgent commands:
 /start — create your wallet, see funding addresses
 /preview <url> — free one-shot summary
 /analyze <url> — $0.15, multi-agent analysis + trace pin
 /confirm <orderId> — $0.20, execute the trade (mocked v0)
 /balance — your USDC on Arc + Base
 /positions — your open orders
-/withdraw <addr> <amount> — exit any time`,
-    ),
-  );
+/withdraw <addr> <amount> — exit any time`;
+    const shielded = `
+
+Confidential payments (experimental):
+/shield <amount> — move USDC into your confidential balance
+/unshield <amount> — move it back to your public wallet
+/shielded_balance — read your confidential balance`;
+    const cfg = toCfg(ctx.env);
+    await safeReply(ctx, cfg.STOA_USE_STABLETRUST ? base + shielded : base);
+  });
 
   return bot;
 }

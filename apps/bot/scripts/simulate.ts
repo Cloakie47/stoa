@@ -110,6 +110,11 @@ function buildCfg(): BotCoreConfig {
     STOA_RECIPIENT_MAINTAINERS: deployerAddress,
     STOA_RECIPIENT_CANTEEN: deployerAddress,
     PINATA_JWT: process.env.PINATA_JWT,
+    // Simulator never exercises the StableTrust path; defaults satisfy the type.
+    STOA_USE_STABLETRUST: false,
+    FAIRBLOCK_API_URL: "https://stabletrust-api.fairblock.network",
+    STABLETRUST_ARC_USDC_ADDRESS:
+      "0x3600000000000000000000000000000000000000",
   };
 }
 

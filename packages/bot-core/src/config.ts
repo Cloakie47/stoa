@@ -40,6 +40,22 @@ export interface BotCoreConfig {
   PINATA_JWT?: string;
   LIMITLESS_TOKEN_ID?: string;
   LIMITLESS_TOKEN_SECRET?: string;
+
+  // Fairblock StableTrust confidential payments (experimental, default off).
+  // When STOA_USE_STABLETRUST is false, every code path that touches the
+  // StableTrust client is unreachable — the bot behaves exactly like the
+  // production public-flow baseline. When true, /analyze + /confirm prefer
+  // confidential transfers (user → operator) and decouple the TracePin
+  // event into a separate operator-signed Arc tx; the 70/20/10 split is
+  // skipped in V1 (operator holds the shielded balance, splits batched
+  // post-flow).
+  STOA_USE_STABLETRUST: boolean;
+  FAIRBLOCK_API_URL: string;
+  STABLETRUST_ARC_USDC_ADDRESS: string;
+  /** Optional. When set, used as the confidential receiver for /analyze
+   *  + /confirm fees. When unset, the receiver address is derived from
+   *  OPERATOR_PRIVATE_KEY — V1 default. */
+  STOA_OPERATOR_STABLETRUST_PRIVATE_KEY?: string;
 }
 
 export function feeAnalyzeMicros(cfg: BotCoreConfig): bigint {

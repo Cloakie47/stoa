@@ -567,6 +567,9 @@ packages:
   '@stoa/limitless-client@file:../../packages/limitless-client':
     resolution: {directory: ../../packages/limitless-client, type: directory}
 
+  '@stoa/stabletrust-client@file:../../packages/stabletrust-client':
+    resolution: {directory: ../../packages/stabletrust-client, type: directory}
+
   '@types/node@22.19.19':
     resolution: {integrity: sha512-dyh/xO2Fh5bYrfWaaqGrRQQGkNdmYw6AmaAUvYeUMNTWQtvb796ikLdmTchRmOlOiIJ1TDXfWgVx1QkUlQ6Hew==}
 
@@ -1189,6 +1192,7 @@ snapshots:
     dependencies:
       '@anthropic-ai/sdk': 0.88.0
       '@stoa/insight-engine': file:../../packages/insight-engine(typescript@5.9.3)
+      '@stoa/stabletrust-client': file:../../packages/stabletrust-client
       viem: 2.49.2(typescript@5.9.3)
     transitivePeerDependencies:
       - bufferutil
@@ -1214,6 +1218,8 @@ snapshots:
       - typescript
       - utf-8-validate
       - zod
+
+  '@stoa/stabletrust-client@file:../../packages/stabletrust-client': {}
 
   '@types/node@22.19.19':
     dependencies:

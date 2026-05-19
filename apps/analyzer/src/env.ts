@@ -34,13 +34,23 @@ function readOptional(name: string): string | undefined {
   return v && v.length > 0 ? v : undefined;
 }
 
+/** Parse an env var as a boolean. Accepts "true", "1", "yes" (case-insensitive)
+ *  as true; everything else (including empty/undefined) is false. The flag
+ *  is intentionally fail-closed: any ambiguity defaults to public flow. */
+function readBool(name: string, defaultValue: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined || v === "") return defaultValue;
+  return /^(true|1|yes)$/i.test(v.trim());
+}
+
 export function loadEnv(): AnalyzerEnv {
+  const arcUsdc = process.env.ARC_USDC ?? "0x3600000000000000000000000000000000000000";
   const cfg: BotCoreConfig = {
     ARC_TESTNET_RPC: process.env.ARC_TESTNET_RPC ?? "https://rpc.testnet.arc.network",
     ARC_CHAIN_ID: process.env.ARC_CHAIN_ID ?? "5042002",
     BASE_RPC: process.env.BASE_RPC ?? "https://mainnet.base.org",
     BASE_CHAIN_ID: process.env.BASE_CHAIN_ID ?? "8453",
-    ARC_USDC: process.env.ARC_USDC ?? "0x3600000000000000000000000000000000000000",
+    ARC_USDC: arcUsdc,
     STOA_SETTLER: readRequired("STOA_SETTLER"),
     STOA_SPLITTER: readRequired("STOA_SPLITTER"),
     STOA_TRACEPIN: readRequired("STOA_TRACEPIN"),
@@ -57,6 +67,15 @@ export function loadEnv(): AnalyzerEnv {
     PINATA_JWT: readOptional("PINATA_JWT"),
     LIMITLESS_TOKEN_ID: readOptional("LIMITLESS_TOKEN_ID"),
     LIMITLESS_TOKEN_SECRET: readOptional("LIMITLESS_TOKEN_SECRET"),
+    STOA_USE_STABLETRUST: readBool("STOA_USE_STABLETRUST", false),
+    FAIRBLOCK_API_URL:
+      process.env.FAIRBLOCK_API_URL ??
+      "https://stabletrust-api.fairblock.network",
+    STABLETRUST_ARC_USDC_ADDRESS:
+      process.env.STABLETRUST_ARC_USDC_ADDRESS ?? arcUsdc,
+    STOA_OPERATOR_STABLETRUST_PRIVATE_KEY: readOptional(
+      "STOA_OPERATOR_STABLETRUST_PRIVATE_KEY",
+    ),
   };
 
   return {

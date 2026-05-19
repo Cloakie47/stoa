@@ -14,6 +14,9 @@ importers:
       '@stoa/insight-engine':
         specifier: file:../../packages/insight-engine
         version: file:../../packages/insight-engine(typescript@5.9.3)
+      '@stoa/stabletrust-client':
+        specifier: file:../../packages/stabletrust-client
+        version: file:../../packages/stabletrust-client
       express:
         specifier: ^4.21.0
         version: 4.22.2
@@ -234,6 +237,9 @@ packages:
 
   '@stoa/insight-engine@file:../../packages/insight-engine':
     resolution: {directory: ../../packages/insight-engine, type: directory}
+
+  '@stoa/stabletrust-client@file:../../packages/stabletrust-client':
+    resolution: {directory: ../../packages/stabletrust-client, type: directory}
 
   '@types/body-parser@1.19.6':
     resolution: {integrity: sha512-HLFeCYgz89uk22N5Qg3dvGvsv46B8GLvKKo1zKG4NybA8U2DiEO3w9lqGg29t/tfLRJpJ6iQxnVw4OnB7MoM9g==}
@@ -725,6 +731,7 @@ snapshots:
     dependencies:
       '@anthropic-ai/sdk': 0.88.0
       '@stoa/insight-engine': file:../../packages/insight-engine(typescript@5.9.3)
+      '@stoa/stabletrust-client': file:../../packages/stabletrust-client
       viem: 2.49.3(typescript@5.9.3)
     transitivePeerDependencies:
       - bufferutil
@@ -741,6 +748,8 @@ snapshots:
       - typescript
       - utf-8-validate
       - zod
+
+  '@stoa/stabletrust-client@file:../../packages/stabletrust-client': {}
 
   '@types/body-parser@1.19.6':
     dependencies:

@@ -29,6 +29,11 @@ import { feeAnalyzeMicros, feeConfirmMicros } from "./config.js";
 import type { DbClient } from "./db-client.js";
 import { runFullAnalysis } from "./insight.js";
 import { placeMockOrder } from "./limitless.js";
+import {
+  confidentialFeeTransfer,
+  pinTraceFromOperator,
+  shieldedBalanceOf,
+} from "./stabletrust.js";
 import { payStoaFee } from "./stoa.js";
 import { sendTelegramMessage } from "./telegram.js";
 import {
@@ -36,11 +41,264 @@ import {
   readUsdcBalanceArc,
   readUsdcBalanceBase,
 } from "./wallet.js";
-import type { Hex } from "viem";
+import type { Address, Hex } from "viem";
 
 function shortHash(h: string): string {
   if (h.length < 12) return h;
   return `${h.slice(0, 6)}…${h.slice(-4)}`;
+}
+
+// ── Fee charging — public vs shielded ────────────────────────────────────────
+//
+// chargeAnalyzeFee + chargeConfirmFee are the single chokepoint where we
+// decide whether to (a) charge via the existing StoaSettler atomic flow
+// (public, current production behavior, never changes) or (b) charge
+// confidentially via Fairblock StableTrust when the operator has flipped
+// STOA_USE_STABLETRUST=true AND the user has enough shielded balance.
+//
+// In shielded mode the TracePin event is DECOUPLED from the user's
+// payment — operator emits TracePin in a separate tx, signed by the
+// operator key, so the user's confidential transfer is not attributable
+// to any specific analysis. The 70/20/10 split is SKIPPED in V1 shielded
+// mode; the operator's StableTrust balance accumulates the fees and the
+// split is performed manually post-flow.
+//
+// On any shielded-flow problem (Fairblock unreachable, circuit breaker
+// open, insufficient shielded balance), the code FALLS THROUGH to the
+// public flow — the user gets a normal /analyze with the public footer
+// and a public 70/20/10 split, no error surfaced. Only a hard failure of
+// the public flow itself surfaces an error to the user.
+
+interface ChargeResult {
+  mode: "public" | "shielded";
+  /** User-side payment tx hash. In public mode this is the StoaSettler
+   *  settle() tx (which also pinned the trace atomically). In shielded
+   *  mode this is the user→operator confidential transfer tx. */
+  user_tx: Hex;
+  /** Operator-signed TracePin tx in shielded mode (the trace pin is split
+   *  off from the user payment to break the on-chain correlation). Null
+   *  in public mode because settle() pins the trace atomically. */
+  trace_pin_tx: Hex | null;
+  amount_micros: bigint;
+}
+
+async function chargeAnalyzeFee(args: {
+  cfg: BotCoreConfig;
+  db: DbClient;
+  wallet: { address: Address; privateKey: Hex };
+  feeMicros: bigint;
+  traceHash: Hex;
+  ipfsCid: string;
+  telegramUserId: number;
+  requestId: string;
+}): Promise<ChargeResult> {
+  const {
+    cfg,
+    db,
+    wallet,
+    feeMicros,
+    traceHash,
+    ipfsCid,
+    telegramUserId,
+    requestId,
+  } = args;
+  const feeUsd = Number(feeMicros) / 1e6;
+
+  if (cfg.STOA_USE_STABLETRUST) {
+    try {
+      const bal = await shieldedBalanceOf({
+        cfg,
+        userPrivateKey: wallet.privateKey,
+      });
+      const available = BigInt(bal.balance.available);
+      if (available >= feeMicros) {
+        // Commit to shielded path. Order of operations:
+        //   1. DB row marking the fee charge in flight (idempotent log).
+        //   2. Operator-signed TracePin tx — runs FIRST because if it
+        //      reverts the user hasn't paid anything; cheap fail-closed.
+        //   3. User → operator confidential transfer via Fairblock API.
+        // The 70/20/10 atomic split is SKIPPED — fees accumulate in the
+        // operator's StableTrust balance and split manually post-flow.
+        const feeId = await db.logFeeChargeStart(
+          telegramUserId,
+          "analyze",
+          Number(feeMicros),
+          null,
+        );
+        try {
+          const pinTx = await pinTraceFromOperator({ cfg, traceHash, ipfsCid });
+          const transfer = await confidentialFeeTransfer({
+            cfg,
+            userPrivateKey: wallet.privateKey,
+            amountMicros: feeMicros,
+          });
+          const userTx = transfer.receipt.hash as Hex;
+          await db.logFeeChargeMined(feeId, userTx);
+          console.log(
+            `[stabletrust] mode=shielded user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+              `shielded_before=$${(Number(available) / 1e6).toFixed(2)} ` +
+              `shielded_after=$${(Number(available - feeMicros) / 1e6).toFixed(2)} ` +
+              `stabletrust_tx=${userTx} trace_pin_tx=${pinTx} request=${requestId}`,
+          );
+          return {
+            mode: "shielded",
+            user_tx: userTx,
+            trace_pin_tx: pinTx,
+            amount_micros: feeMicros,
+          };
+        } catch (e) {
+          await db.logFeeChargeFailed(feeId, (e as Error).message);
+          throw e;
+        }
+      } else {
+        console.log(
+          `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+            `reason=insufficient_shielded_balance shielded_available=$${(Number(available) / 1e6).toFixed(2)} ` +
+            `request=${requestId}`,
+        );
+      }
+    } catch (err) {
+      // CircuitOpenError, StableTrustError, or any other client-side
+      // hiccup — fall through to public flow without surfacing an error.
+      console.log(
+        `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+          `reason=stabletrust_error error=${(err as Error).message} request=${requestId}`,
+      );
+    }
+  }
+
+  // ── Public flow — current production behavior, unchanged ────────────────
+  const feeId = await db.logFeeChargeStart(
+    telegramUserId,
+    "analyze",
+    Number(feeMicros),
+    null,
+  );
+  let txHash: Hex;
+  try {
+    txHash = await payStoaFee({
+      cfg,
+      userPrivateKey: wallet.privateKey,
+      userAddress: wallet.address,
+      amountUsdcMicros: feeMicros,
+      traceHash,
+      ipfsCid,
+    });
+    await db.logFeeChargeMined(feeId, txHash);
+  } catch (e) {
+    await db.logFeeChargeFailed(feeId, (e as Error).message);
+    throw e;
+  }
+  console.log(
+    `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+      `settle_tx=${txHash} request=${requestId}`,
+  );
+  return {
+    mode: "public",
+    user_tx: txHash,
+    trace_pin_tx: null,
+    amount_micros: feeMicros,
+  };
+}
+
+async function chargeConfirmFee(args: {
+  cfg: BotCoreConfig;
+  db: DbClient;
+  wallet: { address: Address; privateKey: Hex };
+  feeMicros: bigint;
+  orderId: string;
+  telegramUserId: number;
+  requestId: string;
+}): Promise<ChargeResult> {
+  const { cfg, db, wallet, feeMicros, orderId, telegramUserId, requestId } =
+    args;
+  const feeUsd = Number(feeMicros) / 1e6;
+
+  if (cfg.STOA_USE_STABLETRUST) {
+    try {
+      const bal = await shieldedBalanceOf({
+        cfg,
+        userPrivateKey: wallet.privateKey,
+      });
+      const available = BigInt(bal.balance.available);
+      if (available >= feeMicros) {
+        const feeId = await db.logFeeChargeStart(
+          telegramUserId,
+          "confirm",
+          Number(feeMicros),
+          orderId,
+        );
+        try {
+          // No TracePin step in /confirm — the trace was pinned during the
+          // earlier /analyze call; /confirm is just execution-side fee.
+          const transfer = await confidentialFeeTransfer({
+            cfg,
+            userPrivateKey: wallet.privateKey,
+            amountMicros: feeMicros,
+          });
+          const userTx = transfer.receipt.hash as Hex;
+          await db.logFeeChargeMined(feeId, userTx);
+          console.log(
+            `[stabletrust] mode=shielded user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+              `shielded_before=$${(Number(available) / 1e6).toFixed(2)} ` +
+              `shielded_after=$${(Number(available - feeMicros) / 1e6).toFixed(2)} ` +
+              `stabletrust_tx=${userTx} request=${requestId}`,
+          );
+          return {
+            mode: "shielded",
+            user_tx: userTx,
+            trace_pin_tx: null,
+            amount_micros: feeMicros,
+          };
+        } catch (e) {
+          await db.logFeeChargeFailed(feeId, (e as Error).message);
+          throw e;
+        }
+      } else {
+        console.log(
+          `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+            `reason=insufficient_shielded_balance shielded_available=$${(Number(available) / 1e6).toFixed(2)} ` +
+            `request=${requestId}`,
+        );
+      }
+    } catch (err) {
+      console.log(
+        `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+          `reason=stabletrust_error error=${(err as Error).message} request=${requestId}`,
+      );
+    }
+  }
+
+  // Public flow
+  const feeId = await db.logFeeChargeStart(
+    telegramUserId,
+    "confirm",
+    Number(feeMicros),
+    orderId,
+  );
+  let txHash: Hex;
+  try {
+    txHash = await payStoaFee({
+      cfg,
+      userPrivateKey: wallet.privateKey,
+      userAddress: wallet.address,
+      amountUsdcMicros: feeMicros,
+    });
+    await db.logFeeChargeMined(feeId, txHash);
+  } catch (e) {
+    await db.logFeeChargeFailed(feeId, (e as Error).message);
+    throw e;
+  }
+  console.log(
+    `[stabletrust] mode=public user=${wallet.address} fee=$${feeUsd.toFixed(2)} ` +
+      `settle_tx=${txHash} request=${requestId}`,
+  );
+  return {
+    mode: "public",
+    user_tx: txHash,
+    trace_pin_tx: null,
+    amount_micros: feeMicros,
+  };
 }
 
 // ── /analyze pipeline ────────────────────────────────────────────────────────
@@ -126,27 +384,19 @@ export async function runAnalyzePipeline(
 
     const analysis = await runFullAnalysis(cfg, marketUrl, bankrollUsd, context);
 
-    const feeId = await db.logFeeChargeStart(
+    const charge = await chargeAnalyzeFee({
+      cfg,
+      db,
+      wallet,
+      feeMicros,
+      traceHash: analysis.trace_hash,
+      ipfsCid: analysis.ipfs_cid ?? "",
       telegramUserId,
-      "analyze",
-      Number(feeMicros),
-      null,
-    );
-    let txHash: Hex;
-    try {
-      txHash = await payStoaFee({
-        cfg,
-        userPrivateKey: wallet.privateKey,
-        userAddress: wallet.address,
-        amountUsdcMicros: feeMicros,
-        traceHash: analysis.trace_hash,
-        ipfsCid: analysis.ipfs_cid ?? "",
-      });
-      await db.logFeeChargeMined(feeId, txHash);
-    } catch (e) {
-      await db.logFeeChargeFailed(feeId, (e as Error).message);
-      throw e;
-    }
+      requestId,
+    });
+    // Pin tx for the proof block is operator's TracePin in shielded mode,
+    // settle() in public mode — both emit the TracePinned event.
+    const pinnedTx: Hex = charge.trace_pin_tx ?? charge.user_tx;
 
     const order_id = crypto.randomUUID();
     const judge = analysis.trace.judge_trace;
@@ -165,13 +415,13 @@ export async function runAnalyzePipeline(
       confidence: judge.confidence,
       trace_hash: analysis.trace_hash,
       ipfs_cid: analysis.ipfs_cid,
-      pinned_tx: txHash,
-      analyze_settle_tx: txHash,
+      pinned_tx: pinnedTx,
+      analyze_settle_tx: charge.user_tx,
     });
     await db.recordTracePin(
       telegramUserId,
       analysis.trace_hash,
-      txHash,
+      pinnedTx,
       analysis.ipfs_cid,
       marketUrl,
       judge.signal,
@@ -181,7 +431,7 @@ export async function runAnalyzePipeline(
 
     const message = formatAnalyzeMessage({
       trace: analysis.trace,
-      txHash,
+      charge,
       ipfsCid: analysis.ipfs_cid,
       orderId: order_id,
       bankrollUsd,
@@ -193,7 +443,7 @@ export async function runAnalyzePipeline(
       order_id,
       trace_hash: analysis.trace_hash,
       ipfs_cid: analysis.ipfs_cid,
-      analyze_settle_tx: txHash,
+      analyze_settle_tx: charge.user_tx,
       signal: judge.signal,
       recommended_size_usdc: judge.recommended_size_usdc,
       confidence: judge.confidence,
@@ -268,25 +518,16 @@ export async function runConfirmPipeline(
       );
     }
 
-    const feeId = await db.logFeeChargeStart(
-      telegramUserId,
-      "confirm",
-      Number(feeMicros),
+    const charge = await chargeConfirmFee({
+      cfg,
+      db,
+      wallet,
+      feeMicros,
       orderId,
-    );
-    let settleTx: Hex;
-    try {
-      settleTx = await payStoaFee({
-        cfg,
-        userPrivateKey: wallet.privateKey,
-        userAddress: wallet.address,
-        amountUsdcMicros: feeMicros,
-      });
-      await db.logFeeChargeMined(feeId, settleTx);
-    } catch (e) {
-      await db.logFeeChargeFailed(feeId, (e as Error).message);
-      throw e;
-    }
+      telegramUserId,
+      requestId,
+    });
+    const settleTx = charge.user_tx;
 
     const side = (order.side as "BUY" | "SELL" | null) ?? "BUY";
     const price = order.price ?? 0.5;
@@ -301,12 +542,17 @@ export async function runConfirmPipeline(
 
     await db.markOrderConfirmed(orderId, settleTx, mock.orderId);
 
+    const feeHeaderLine =
+      charge.mode === "shielded"
+        ? `*Confirmed* — $0.20 execution fee charged confidentially via Fairblock StableTrust.`
+        : `*Confirmed* — $0.20 execution fee charged, split 70/20/10 atomic on Arc.`;
+    const txLabel = charge.mode === "shielded" ? "Confidential tx" : "Arc tx";
     const message =
-      `*Confirmed* — $0.20 execution fee charged, split 70/20/10 atomic on Arc.\n\n` +
+      `${feeHeaderLine}\n\n` +
       `Trade (MOCKED v0): ${side} ${size.toFixed(2)} @ $${price.toFixed(2)}\n` +
       `Limitless orderId: \`${mock.orderId}\`\n\n` +
-      `Arc tx: [${shortHash(settleTx)}](https://testnet.arcscan.app/tx/${settleTx})\n\n` +
-      `_When the Limitless partner token arrives, this exact flow will place a real order on Base. The Arc split is real today._\n\n` +
+      `${txLabel}: [${shortHash(settleTx)}](https://testnet.arcscan.app/tx/${settleTx})\n\n` +
+      `_When the Limitless partner token arrives, this exact flow will place a real order on Base. The Arc payment is real today._\n\n` +
       `_Request \`${requestId}\` complete._`;
 
     await sendTelegramMessage(cfg.TELEGRAM_BOT_TOKEN, chatId, message);
@@ -332,7 +578,7 @@ export async function runConfirmPipeline(
 
 interface FormatAnalyzeArgs {
   trace: FullTrace;
-  txHash: Hex;
+  charge: ChargeResult;
   ipfsCid: string | null;
   orderId: string;
   bankrollUsd: number;
@@ -343,9 +589,19 @@ interface FormatAnalyzeArgs {
  * Render the full Metaculus-template analyze result for Telegram. Markdown
  * format; `sendTelegramMessage` retries as plain text on Markdown parse
  * failures so a stray backtick/asterisk doesn't kill the response.
+ *
+ * Footer + proof block branch by charge.mode:
+ *   - public:   footer says "split 70/20/10 atomic on Arc"; proof block's
+ *               "Arc tx" link points to the StoaSettler settle() tx
+ *               (which atomically pinned the trace).
+ *   - shielded: footer says "charged confidentially via Fairblock
+ *               StableTrust" and adds a [Confidential tx] link; proof
+ *               block's "Arc tx" link points to the SEPARATE operator-
+ *               signed TracePin tx (no on-chain link to the user payment).
  */
 function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
-  const { trace, txHash, ipfsCid, orderId, bankrollUsd, requestId } = args;
+  const { trace, charge, ipfsCid, orderId, bankrollUsd, requestId } = args;
+  const proofTx: Hex = charge.trace_pin_tx ?? charge.user_tx;
   const j: JudgeTrace = trace.judge_trace;
   const yes = clamp01(j.market_price_yes);
   const no = 1 - yes;
@@ -413,7 +669,7 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
   const watchBlock = renderWatchBlock(j);
 
   // ── Section 8: proof of analysis ────────────────────────────────────────
-  const proofBlock = renderProofBlock(txHash, ipfsCid);
+  const proofBlock = renderProofBlock(proofTx, ipfsCid);
 
   // ── Section 9: separator ────────────────────────────────────────────────
   const separator = "────────────────────────────────────────";
@@ -425,7 +681,10 @@ function formatAnalyzeMessage(args: FormatAnalyzeArgs): string {
       : `Ready to execute? /confirm ${orderId}\n  ($0.20 execution fee on Arc + your trade on Limitless)`;
 
   // ── Section 11: request footer ──────────────────────────────────────────
-  const requestFooter = `_Request \`${requestId}\` — $0.15 charged, split 70/20/10 atomic on Arc._`;
+  const requestFooter =
+    charge.mode === "shielded"
+      ? `_Request \`${requestId}\` — $0.15 charged confidentially via Fairblock StableTrust. [Confidential tx](https://testnet.arcscan.app/tx/${charge.user_tx})._`
+      : `_Request \`${requestId}\` — $0.15 charged, split 70/20/10 atomic on Arc._`;
 
   const parts: (string | null)[] = [
     calloutBlock,

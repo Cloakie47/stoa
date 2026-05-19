@@ -6,10 +6,4 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
-  external: [
-    "@anthropic-ai/sdk",
-    "@stoa/insight-engine",
-    "@stoa/stabletrust-client",
-    "viem",
-  ],
 });

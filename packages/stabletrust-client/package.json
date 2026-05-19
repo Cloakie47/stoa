@@ -1,7 +1,7 @@
 {
-  "name": "@stoa/bot-core",
+  "name": "@stoa/stabletrust-client",
   "version": "0.0.1",
-  "description": "Platform-agnostic business logic for the Stoa bot: viem wallet helpers, EIP-3009 + StoaSettler integration, insight-engine wrapper, Limitless mock, Telegram helpers, and the long-running analyze/confirm pipelines. Consumed by apps/bot (Cloudflare Worker) and apps/analyzer (Railway/Express).",
+  "description": "Typed HTTP client for the Fairblock StableTrust confidential-token API on Arc. Wraps deposit-to-shield / get-shielded-balance / confidential-transfer / withdraw-to-public with a 30s timeout and an in-memory circuit breaker so Fairblock outages fail fast instead of cascading 30s timeouts into Stoa /analyze latency. Used by Stoa /analyze + /confirm to charge fees confidentially when STOA_USE_STABLETRUST is enabled.",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -29,12 +29,6 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
-  },
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.88.0",
-    "@stoa/insight-engine": "file:../insight-engine",
-    "@stoa/stabletrust-client": "file:../stabletrust-client",
-    "viem": "^2.39.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

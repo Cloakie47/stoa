@@ -68,3 +68,13 @@ export {
   type AnalyzePipelineResult,
   type ConfirmPipelineResult,
 } from "./pipelines.js";
+
+export {
+  getStableTrustClient,
+  operatorShieldedRecipient,
+  pinTraceFromOperator,
+  shieldDeposit,
+  shieldedBalanceOf,
+  shieldWithdraw,
+  confidentialFeeTransfer,
+} from "./stabletrust.js";
