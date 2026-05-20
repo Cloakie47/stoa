@@ -23,6 +23,7 @@ import express, { type Request, type Response } from "express";
 import { httpDbClient } from "./db-http-client.js";
 import { loadEnv } from "./env.js";
 import { verifyRequest } from "./hmac.js";
+import { makeX402Route } from "./x402-route.js";
 
 const env = loadEnv();
 const dbc = httpDbClient({
@@ -35,6 +36,12 @@ const dbc = httpDbClient({
 // input to the bytes the bot signed, so we capture the raw body via the
 // `verify` callback before express.json() parses it.
 const app = express();
+// Trust Railway's reverse proxy so req.ip reflects the original client.
+// Used by the x402 rate-limiter; harmless for the HMAC-protected /jobs/*
+// endpoints which don't read req.ip. If we're not actually behind a proxy
+// (e.g. local `pnpm run dev`), Express still falls back to socket address
+// — see sourceKey() in x402-route.ts.
+app.set("trust proxy", true);
 app.use(
   express.json({
     limit: "256kb",
@@ -47,6 +54,13 @@ app.use(
 app.get("/", (_req, res) => {
   res.status(200).send("stoa-analyzer ok");
 });
+
+// ── x402 facilitator endpoint ────────────────────────────────────────────
+// POST /api/x402/analyze — public, on-chain-paid /analyze for AI agents.
+// Independent of the Telegram-bot HMAC path; uses USDC Transfer events on
+// Arc Testnet as the authentication primitive (one tx = one analysis).
+const x402 = makeX402Route({ cfg: env.cfg });
+app.post("/api/x402/analyze", x402.handler);
 
 app.get("/version", (_req, res) => {
   res.json({
@@ -175,4 +189,5 @@ app.listen(env.PORT, env.HOST, () => {
   console.log(`  bot internal URL: ${env.BOT_INTERNAL_URL}`);
   console.log(`  arc RPC:          ${env.cfg.ARC_TESTNET_RPC}`);
   console.log(`  StoaSettler:      ${env.cfg.STOA_SETTLER}`);
+  console.log(`  x402 endpoint:    POST /api/x402/analyze`);
 });
