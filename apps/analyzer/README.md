@@ -2,6 +2,146 @@
 
 Long-running pipeline service for the Stoa bot. Runs `/analyze` (multi-agent LLM + Stoa atomic split + trace pin) and `/confirm` (Stoa split + Limitless trade) past Cloudflare Workers' 30-second cap.
 
+It also hosts the **Stoa x402 facilitator endpoint** at `POST /api/x402/analyze` — see the section below for the agent-facing API.
+
+# Stoa x402 Facilitator API
+
+Stoa is an x402 facilitator on Circle's Arc Testnet. Any HTTP client (AI agent, server-side service, browser app) can request prediction-market analysis programmatically by paying USDC on-chain. No API keys, no signup, no rate-limit waitlist — just a payment per call.
+
+## Quick start (curl)
+
+**Step 1** — Ask for analysis, get a 402 payment challenge:
+
+```bash
+curl -X POST https://stoa-production-9781.up.railway.app/api/x402/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"marketUrl": "https://polymarket.com/event/..."}'
+```
+
+Response (HTTP 402):
+
+```json
+{
+  "error": "Payment required",
+  "facilitator": "stoa.v1",
+  "mode": "public",
+  "amount": "0.15",
+  "asset": "USDC",
+  "chain": "arc-testnet",
+  "chainId": 5042002,
+  "recipient": "0x05a98A1dCa17917B6e8B19306c1653fA9FC5d689",
+  "asset_address": "0x3600000000000000000000000000000000000000",
+  "freshness_window_seconds": 300,
+  "instructions": "Transfer 0.15 USDC (or more) to 0x05a98A1d… on Arc Testnet (chainId 5042002). Then retry this request including the header X-PAYMENT: <tx_hash>. …",
+  "docs": "https://github.com/Cloakie47/stoa#x402-api"
+}
+```
+
+**Step 2** — Pay USDC on Arc Testnet:
+
+Transfer 0.15 USDC (or more) to the recipient address on Arc Testnet (chainId 5042002). Note the transaction hash. Any Arc-compatible wallet works (MetaMask configured for Arc, viem, ethers, …).
+
+Example using viem (TypeScript):
+
+```typescript
+import { createWalletClient, http, parseUnits } from 'viem';
+
+const txHash = await walletClient.writeContract({
+  address: '0x3600000000000000000000000000000000000000', // USDC on Arc
+  abi: usdcAbi,
+  functionName: 'transfer',
+  args: ['0x05a98A1dCa17917B6e8B19306c1653fA9FC5d689', parseUnits('0.15', 6)],
+});
+await publicClient.waitForTransactionReceipt({ hash: txHash });
+```
+
+**Step 3** — Retry with payment proof:
+
+```bash
+curl -X POST https://stoa-production-9781.up.railway.app/api/x402/analyze \
+  -H "Content-Type: application/json" \
+  -H "X-PAYMENT: 0x<your_tx_hash>" \
+  -d '{"marketUrl": "https://polymarket.com/event/..."}'
+```
+
+Response (HTTP 200):
+
+```json
+{
+  "verdict": "BUY_NO",
+  "confidence": 0.73,
+  "edge": 0.11,
+  "marketQuestion": "Will example resolve YES?",
+  "marketUrl": "https://polymarket.com/event/...",
+  "thesis": "Recent reporting points to NO — see the agent traces in the pinned reasoning trace for citations.",
+  "ipfs_trace": "QmPbX9...",
+  "arc_settlement_tx": "0x<your_tx_hash>",
+  "settlement_mode": "x402_public",
+  "schema_version": "stoa.x402.v1",
+  "_note": "recommended_size_usdc is omitted in x402 mode since callers do not have a Stoa-managed bankroll"
+}
+```
+
+A working end-to-end reference implementation in TypeScript lives at [`examples/x402-client.ts`](examples/x402-client.ts) — copy, set env vars, run.
+
+## Pricing
+
+- **$0.15 USDC per analysis** (Arc-Testnet USDC, contract `0x3600000000000000000000000000000000000000`)
+- Overpayment is accepted as a tip — no refund attempted in V1.
+
+## Payment requirements
+
+| Field | Value |
+|---|---|
+| Recipient | `0x05a98A1dCa17917B6e8B19306c1653fA9FC5d689` (`STOA_SETTLER`) |
+| Asset | USDC on Arc Testnet, contract `0x3600000000000000000000000000000000000000` |
+| Chain ID | `5042002` |
+| Min amount | `150000` micros (`0.15` USDC) |
+| Freshness | tx must be `< 5 minutes` old at the time of retry |
+| Uniqueness | each tx hash can be used for **one** analysis only (replay-protected for 24h) |
+
+## Error reasons (HTTP 402 body `reason` field)
+
+| reason | meaning | what to do |
+|---|---|---|
+| `tx_not_found` | The X-PAYMENT tx hash doesn't exist on Arc | Confirm the tx mined on Arc Testnet, then retry. |
+| `tx_not_confirmed` | Tx exists but not yet mined / receipt unavailable | Wait a few seconds for confirmation and retry. |
+| `tx_failed` | Tx reverted on-chain | The on-chain transfer failed; send a new one. |
+| `wrong_recipient` | Tx didn't transfer USDC to the Stoa settler | Verify the recipient address in your transfer and retry. |
+| `insufficient_amount` | Less than 0.15 USDC transferred (response includes `received_amount` + `required_amount` in micros) | Send a top-up tx and retry with the new hash, or replace the payment entirely. |
+| `tx_too_old` | More than 5 minutes since the tx was confirmed | Send a fresh payment and retry within 5 minutes. |
+| `replay_detected` | This tx hash was already used for an analysis | Send a new payment for the next analysis. |
+
+Malformed input (missing/invalid `marketUrl`, non-hex `X-PAYMENT`) returns **HTTP 400**, not 402.
+
+Rate-limit exceeded (10 unpaid challenges / min or 60 paid retries / min from the same IP) returns **HTTP 429**.
+
+## What Stoa does on a successful call
+
+Each call runs the same 3-model Judge ensemble (Claude Haiku + Sonnet × 2 today; subject to upgrade) on the requested prediction market that the Telegram bot uses:
+
+- **Direction signal** — `BUY_YES`, `BUY_NO`, or `PASS`.
+- **Calibrated confidence** — `[0, 1]`, derived from the ensemble's median P(YES) and the calibration policy ([`packages/bot-core/src/calibration.ts`](../../packages/bot-core/src/calibration.ts)).
+- **Edge vs market price** — signed `[-1, 1]`, positive when the model's probability is favorable for the recommended side.
+- **Investment thesis** — short string summarising the call. The full reasoning chain (4 specialist agents + Judge ensemble) is pinned to IPFS via Pinata.
+- **`ipfs_trace`** — content-addressed pointer to the full JSON trace, fetchable via `https://gateway.pinata.cloud/ipfs/<cid>`. Verifiers can recompute the trace hash and confirm the analysis happened as reported.
+
+x402 callers do **not** receive `recommended_size_usdc` — the Kelly machinery still runs internally on a notional bankroll for the verdict + edge calibration, but the dollar size is omitted from the response since x402 callers have no Stoa-managed wallet (use your own portfolio sizing).
+
+## Limitations (V1)
+
+- **Public payment only.** Confidential payment via Fairblock StableTrust is V1.1 roadmap, pending recipient-side amount-visibility confirmation from Fairblock.
+- **In-memory replay cache.** Single Railway instance; if the analyzer restarts, the cache resets (no payment becomes valid twice, but the same tx hash could be re-spent across restarts — operator runs a single instance for V1, D1-backed in V1.1).
+- **No response-time SLA.** Typical analysis is 60–90s (multi-agent LLM calls + RPC + IPFS pin).
+- **Polymarket only.** Limitless and other venues land in V1.1.
+- **Replay cache survives only the current process.** A restart loses the cache; reuse is then possible until a D1-backed cache lands in V1.1.
+
+## Example end-to-end agent integration
+
+See [`examples/x402-client.ts`](examples/x402-client.ts) for a working TypeScript reference implementation an AI agent (or any TypeScript service) can use to call this API.
+
+────────────────────────────────────────
+
 ## Why this service exists
 
 Cloudflare Workers' `waitUntil` has a 30-second hard cap (even on paid plans). The `/analyze` pipeline routinely takes 30-60+ seconds: ~20s of multi-agent LLM calls, ~5-15s of Arc RPC round-trips for the StoaSettler.settle tx, ~5s of Pinata IPFS upload. The Worker can't host that work. This Express service can.
