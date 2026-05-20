@@ -481,7 +481,17 @@ export async function runAnalyzePipeline(
       throw e;
     }
 
-    const analysis = await runFullAnalysis(cfg, marketUrl, bankrollUsd, context);
+    // Redact IPFS pin when confidential payment is the intent. Mirrors
+    // the predicate chargeAnalyzeFee uses to decide whether to attempt
+    // the shielded charge — same `tryShielded` evaluation. If the
+    // shielded charge later falls through to public (insufficient
+    // balance, Fairblock unreachable, leg failure) the pinned trace
+    // still has economics stripped: privacy beats consistency. The
+    // user-facing Telegram message is unchanged in either case.
+    const redactPin = cfg.STOA_USE_STABLETRUST && args.paymentMode !== "public";
+    const analysis = await runFullAnalysis(cfg, marketUrl, bankrollUsd, context, {
+      redactPin,
+    });
 
     const charge = await chargeAnalyzeFee({
       cfg,

@@ -292,3 +292,88 @@ migration required.
 
 Estimated work: 6–8h for an experienced engineer with bot-core
 context. Lower if the sweeper deferred to V1.1.
+
+## Trace privacy
+
+Stoa pins reasoning traces to IPFS for verifiability. In confidential
+mode, user-specific economic fields are stripped from the trace before
+pinning. Public mode pins the full trace unchanged.
+
+The Telegram message the user receives is identical in both modes —
+the redaction only affects the publicly-fetchable IPFS artifact and
+the on-chain trace hash (which is computed over the redacted bytes
+so a verifier fetching the CID can recompute and match).
+
+### Why this matters
+
+Without redaction, an observer can fetch the IPFS CID emitted by
+TracePin (which records the hash + URI on Arc) and read the original
+JSON. That JSON contains `user_balance_usdc`, `recommended_size_usdc`,
+`kelly_fraction`, and `recommendation_reason` (which embeds free-text
+mentions like "Sized at 12% of $28.94 bankroll"). With the bankroll
+in hand, the observer correlates against on-chain balance state to
+identify the user wallet behind the confidential transfer — defeating
+the cryptographic privacy Fairblock StableTrust provided for the
+payment leg. Partial removal is not enough: `kelly_fraction` ×
+`recommended_size_usdc` re-derives the bankroll mathematically, so
+all related fields must go together.
+
+### Fields removed in confidential mode
+
+At every nesting level:
+- `user_balance_usdc` (top-level)
+- `recommended_size_usdc` (top-level, `judge_trace`,
+  `judge_ensemble.aggregate`, every `judge_ensemble.runs[].trace`)
+- `kelly_fraction` (in every mirror above)
+- `recommendation_reason` (in every mirror above)
+
+Everything else stays: `market_question`, all 4 specialist
+`agent_traces`, the Judge ensemble's `reasoning`/`thesis`/
+`counter_arguments`/`risk_decomposition`/`evidence`/
+`model_probability_yes`/`calibration_adjustment`, `final_signal`,
+`final_confidence`, `trace_hash`, `schema_version`, timestamps, and
+`token_usage`. The redacted trace still cryptographically commits to
+the non-economic reasoning chain, so the audit story for "which
+agents emitted what claims" is preserved.
+
+The implementation is a single pure function,
+`stripTradeplanFromTrace`, in `packages/bot-core/src/insight.ts`.
+The /analyze pipeline computes a `redactPin` flag equal to the
+shielded-attempt predicate (`STOA_USE_STABLETRUST && paymentMode
+!== "public"`) and passes it to `runFullAnalysis`, which hashes and
+pins the stripped clone in that case. Privacy is preferred over
+consistency: if the shielded charge later falls through to public
+(insufficient balance, Fairblock unreachable, or a leg failure), the
+pinned trace stays stripped because the user's *intent* was
+confidential.
+
+### Privacy model
+
+Trace redaction is operator-mediated discretion — the operator
+commits to not publishing user-specific data in confidential mode.
+This is a strictly weaker guarantee than the cryptographic privacy
+Fairblock StableTrust provides for payment amounts: a malicious
+operator (or a compromised one) could still log the unredacted
+trace internally. The redaction blocks passive observers who fetch
+the IPFS CID; it does not protect against the operator itself.
+
+The on-chain `trace_hash` recorded by TracePin matches the
+*redacted* JSON's hash in confidential mode, so verifiers fetching
+the CID and recomputing get a clean match. There is no separate
+"private hash" — the audit trail commits to exactly the bytes that
+are publicly available.
+
+### V1.5 roadmap
+
+To remove the operator from the trust boundary on this dimension,
+V1.5 plans asymmetric encryption of the user-specific trace fields
+using keys derived from the user's wallet pubkey. The pinned trace
+would contain a ciphertext block of the redacted fields that only
+the user's wallet can decrypt, making trace privacy trust-minimized
+(operator cannot decrypt after pinning) for non-custodial users.
+
+For custodial bot users (everyone who exported via `/start` without
+later supplying an external wallet) this remains discretion-based
+until V2 introduces external-wallet-connection options — at that
+point the operator-managed key is no longer in the loop and the
+asymmetric scheme provides end-to-end privacy.

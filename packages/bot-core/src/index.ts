@@ -52,6 +52,7 @@ export {
 export {
   runFullAnalysis,
   runSingleLLMPreview,
+  stripTradeplanFromTrace,
   type SingleLLMSummary,
   type FullAnalysis,
 } from "./insight.js";

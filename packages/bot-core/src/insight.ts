@@ -39,6 +39,66 @@ export interface FullAnalysis {
   cost_usd: number;
 }
 
+/**
+ * Return a deep clone of the FullTrace with user-specific economic fields
+ * removed at every nesting level. Used to redact the IPFS-pinned reasoning
+ * trace in confidential mode so that observers fetching the CID cannot
+ * recover the user's bankroll or position size — both of which would
+ * defeat the confidentiality Fairblock StableTrust provides for the
+ * payment leg by correlating the trace's economics with on-chain balance
+ * deltas.
+ *
+ * Original trace is NOT mutated. Idempotent: calling twice = calling once.
+ *
+ * Fields removed (every occurrence):
+ *   - user_balance_usdc (top-level)
+ *   - recommended_size_usdc (top-level + judge_trace + ensemble.aggregate +
+ *                            every ensemble.runs[].trace)
+ *   - kelly_fraction (every mirror)
+ *   - recommendation_reason (every mirror — also the field that embeds
+ *                            "$XX.XX bankroll" text)
+ *
+ * Everything else (market_question, agent_traces, judge reasoning, thesis,
+ * counter_arguments, risk_decomposition, evidence, model_probability_yes,
+ * calibration_adjustment, final_signal, trace_hash, schema_version,
+ * timestamps, token_usage) stays. The redacted trace is still
+ * cryptographically the same audit artifact for the non-economic
+ * reasoning chain.
+ */
+export function stripTradeplanFromTrace(trace: FullTrace): FullTrace {
+  const stripped = structuredClone(trace) as unknown as Record<string, unknown>;
+
+  delete stripped.user_balance_usdc;
+  delete stripped.recommended_size_usdc;
+
+  const jt = stripped.judge_trace as Record<string, unknown> | undefined;
+  if (jt) {
+    delete jt.recommended_size_usdc;
+    delete jt.kelly_fraction;
+    delete jt.recommendation_reason;
+  }
+
+  const ens = stripped.judge_ensemble as
+    | { aggregate?: Record<string, unknown>; runs?: Array<{ trace?: Record<string, unknown> }> }
+    | undefined;
+  if (ens?.aggregate) {
+    delete ens.aggregate.recommended_size_usdc;
+    delete ens.aggregate.kelly_fraction;
+    delete ens.aggregate.recommendation_reason;
+  }
+  if (ens?.runs) {
+    for (const run of ens.runs) {
+      if (run?.trace) {
+        delete run.trace.recommended_size_usdc;
+        delete run.trace.kelly_fraction;
+        delete run.trace.recommendation_reason;
+      }
+    }
+  }
+
+  return stripped as unknown as FullTrace;
+}
+
 function plumbEnv(cfg: BotCoreConfig): void {
   globalThis.process ??= { env: {} } as unknown as NodeJS.Process;
   globalThis.process.env ??= {} as NodeJS.ProcessEnv;
@@ -79,6 +139,13 @@ export async function runFullAnalysis(
    *  fetchMarketContext separately (e.g. to refuse early on event URLs with
    *  no analyzable sub-markets before charging the fee). */
   preFetchedContext?: MarketContext,
+  /** When true, the trace that gets HASHED and pinned to IPFS has
+   *  user-economic fields stripped (see stripTradeplanFromTrace). The
+   *  caller still receives the FULL trace for the Telegram UI — only
+   *  the publicly-fetchable artifact (IPFS) is redacted. Used by the
+   *  /analyze pipeline when confidential payment mode is in effect.
+   *  Defaults to false: full trace is hashed + pinned, current behavior. */
+  options?: { redactPin?: boolean },
 ): Promise<FullAnalysis> {
   plumbEnv(cfg);
   const result = await analyzeMarket(marketUrl, userBalanceUsdc, {
@@ -167,11 +234,23 @@ export async function runFullAnalysis(
   );
 
   // ── Hash + IPFS pin ────────────────────────────────────────────────────
-  const trace_hash = hashTrace(result.trace);
+  // When redactPin is set (confidential mode), hash and pin a redacted
+  // clone of the trace — user-economic fields are stripped so that the
+  // publicly-fetchable IPFS object cannot be used to recover the user's
+  // bankroll or position size. The full trace is still returned to the
+  // caller for the Telegram UI; only the on-chain hash and the pinned
+  // JSON reference the redacted shape. This is consistent: the
+  // trace_hash that TracePin records is the hash of the JSON Pinata
+  // serves, so a verifier fetching the CID can recompute and match.
+  const redactPin = options?.redactPin === true;
+  const traceToPin = redactPin
+    ? stripTradeplanFromTrace(result.trace)
+    : result.trace;
+  const trace_hash = hashTrace(traceToPin);
   result.trace.trace_hash = trace_hash;
   let cid: string | null = null;
   try {
-    cid = await uploadToIpfs(result.trace);
+    cid = await uploadToIpfs(traceToPin);
   } catch (e) {
     console.warn(`[insight] IPFS upload failed: ${(e as Error).message}`);
   }
