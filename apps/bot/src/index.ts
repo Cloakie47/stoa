@@ -106,7 +106,7 @@ function makeBot(env: Env): Bot {
     if (!cfg.STOA_USE_STABLETRUST) {
       await safeReply(
         ctx,
-        `🧠 Starting analysis (request \`${requestId}\`) — result in ~60 seconds. You can leave the chat; we'll DM you when it's done.`,
+        `🧠 Starting analysis (request \`${requestId}\`) — result in ~2-3 minutes. You can leave the chat; we'll DM you when it's done.`,
       );
       try {
         await dispatchAnalyzeJob({
@@ -173,7 +173,7 @@ function makeBot(env: Env): Bot {
       // Replace the keyboard with a status line so the user knows the
       // choice was committed and the buttons can no longer be tapped.
       await ctx.editMessageText(
-        `🧠 *Analyze* request \`${requestId}\` — ${paymentMode} mode dispatched. Result in ~60s.`,
+        `🧠 *Analyze* request \`${requestId}\` — ${paymentMode} mode dispatched. Result in ~2-3 min.`,
         { parse_mode: "Markdown" },
       );
     } catch {
